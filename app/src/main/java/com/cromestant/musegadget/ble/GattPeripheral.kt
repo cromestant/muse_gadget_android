@@ -179,6 +179,7 @@ class GattPeripheral(
         false
     }
 
+    fun isAdvertising(): Boolean = advertising
     /** Open the GATT server and start advertising (while unpaired). */
     fun start() {
         val manager = try {
