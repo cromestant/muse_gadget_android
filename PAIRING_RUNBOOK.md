@@ -14,13 +14,14 @@ First live pairing between the Portal Mini app and the Muse app.
 ## (c) Enable ADB on the Portal Mini [NEEDS CHARLES]
 
 1. On the Portal Mini: tap build number 7x to enable developer options, turn on USB debugging. [NEEDS CHARLES]
+   - If tapping build number does nothing, finish Settings -> software update first (ADB support needs recent firmware). [NEEDS CHARLES]
 2. Connect USB-C to the Dell and accept the debugging prompt. [NEEDS CHARLES]
 
 ## (d) Build and install from the Dell [HE CAN RUN]
 
-1. `export JAVA_HOME=/home/cromestant/jdk/jdk-17.0.20.1+1`
+1. `cd ~/code/portal && export JAVA_HOME=/home/cromestant/jdk/jdk-17.0.20.1+1`
 2. `./gradlew test` (all green), `./gradlew assembleDebug`.
-3. `adb install -r app/build/outputs/apk/debug/app-debug.apk`.
+3. `~/Android/Sdk/platform-tools/adb install -r app/build/outputs/apk/debug/app-debug.apk` (adb is not on PATH).
 
 ## (e) First launch on the Mini [NEEDS CHARLES]
 
@@ -34,7 +35,7 @@ First live pairing between the Portal Mini app and the Muse app.
 
 ## (g) Pair in the Muse app [NEEDS CHARLES]
 
-1. In the Muse app: add device, pick `MuseGadgetXXXXXX` when it appears, confirm pairing. [NEEDS CHARLES]
+1. In the Muse app: Settings > Devices, look for `MuseGadgetXXXXXX` in the scan list, tap it to pair and confirm. [NEEDS CHARLES]
 
 ## (h) Expected vs failure modes
 
