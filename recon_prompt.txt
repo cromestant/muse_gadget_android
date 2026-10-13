@@ -1,0 +1,18 @@
+You are doing PROTOCOL RECONNAISSANCE for porting the Muse Gadgets device protocol to a native Kotlin Android app. Working directory: /home/cromestant/code/portal. The official SDK is cloned read-only at ref/muse-gadget-sdk -- READ ONLY. Never build, run, install, or modify anything under ref/. Read-only recon: do not install anything on this machine.
+
+Context: target device is a Meta Portal Mini (Android 10 / API 29, arm64, no Play Services). We are building a native Kotlin app that implements the gadget device protocol and pairs as a "MuseGadget" (push-to-talk voice up, text/images down). THIS CHUNK IS RECON ONLY -- write the recon document, write NO app code.
+
+Write /home/cromestant/code/portal/PROTOCOL_RECON.md documenting, with file:line citations for EVERY protocol claim (format: ref/muse-gadget-sdk/<path>:<line>):
+
+1. Pairing flow: transport (BLE GATT? which service/characteristics -- check ble_setup.py, ble_framing.py, ble_server.py), crypto (Noise protocol? which pattern -- XX is suspected, verify in noise/noise_xx.py and the C noise_core/), the key-exchange step sequence, what the SDK token is and where it enters the flow, how device identity keys are generated/stored (identity.py, config.py).
+2. Post-pairing session to Muse: transport (TCP/TLS to Meta cloud? WebSocket? -- check network.py, link_client.py), framing, encryption (Noise transport session? session keys?), message envelope format (noise/envelope.py, noise/framing.py, noise/transport.py).
+3. Turn lifecycle: how a conversation turn is opened/closed (muse_turn.py and C mirror muse_chat.c, muse_chat_session.cpp, muse_chat_link.c).
+4. Audio uplink for PTT: codec (ADPCM suspected -- verify in esp32/components/muse/muse_adpcm.c and muse_voice.c), sample rate, channels, frame/chunk sizes, on-the-wire framing, start/stop markers, max turn duration, silence handling.
+5. Downlink message formats: text replies, images/cards -- exact field names and serialization (muse_api.py, muse_chat_text.c). How does the device know a turn is complete?
+6. Keepalive / heartbeat / reconnect behavior and session resumption (muse_link.c, service.py).
+7. Is the Python Linux SDK a faithful mirror of the C session implementation? It is the preferred port reference for Kotlin -- confirm function-by-function correspondence or list divergences explicitly.
+8. Test vectors: enumerate everything under linux/tests/vectors/ and esp32/tests/ usable later to validate a Kotlin implementation (Noise handshake vectors? framing vectors? ADPCM vectors?).
+9. Proposed Kotlin module breakdown for the app (packages/classes), mapped to the protocol pieces above.
+10. Honest list of OPEN UNKNOWNS -- things the source does not answer that the build will need (cloud endpoint URLs, token provisioning outside gadgets.muse.ai, TTS/spoken replies, anything else).
+
+Keep it tight and factual. Every claim cites file:line. If a file named above does not exist, say so and use the closest actual file. Also read ref/muse-gadget-sdk/linux/AGENTS.md and ref/muse-gadget-sdk/esp32/AGENTS.md first if they exist -- they are written for coding agents.
