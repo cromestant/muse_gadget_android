@@ -138,6 +138,10 @@ class MuseTurnTracker {
         !busy && replies.values.all { it.done } &&
             (taskFinished || nowMs - lastActivityMs >= 3000)
 
+    /** Concatenated text of ALL replies (done or not) in arrival order. */
+    fun allText(): String =
+        replies.values.joinToString("") { it.text }
+
     /** Concatenated done-reply texts in arrival order. */
     fun finalText(): String =
         replies.values.filter { it.done }.joinToString("") { it.text }

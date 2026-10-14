@@ -1,6 +1,7 @@
 package com.cromestant.musegadget.link
 
 import android.content.Context
+import com.cromestant.musegadget.audio.DeviceTts
 import com.cromestant.musegadget.audio.TtsPlayer
 import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.identity.TokenStore
@@ -52,6 +53,10 @@ internal fun describeChatEvent(ev: Map<String, Any?>): String {
         sb.append(" keys=").append(payload.keys.joinToString(","))
         val idVal = payload["id"] as? String
         if (idVal != null) sb.append(" id=").append(idVal.take(20))
+        val meta = payload["metadata"]
+        if (meta != null) sb.append(" meta=").append(meta.toString().take(120))
+        val seq = payload["message_seq"]
+        if (seq != null) sb.append(" seq=").append(seq.toString().take(20))
     }
     return sb.toString()
 }
@@ -104,6 +109,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      * recreation. Lazy so unit-test construction never touches Android.
      */
     private val ttsPlayer: TtsPlayer by lazy { TtsPlayer(appContext) }
+    private val deviceTts: DeviceTts by lazy { DeviceTts(appContext) }
     @Volatile private var ttsThread: Thread? = null
     @Volatile private var lastRotateAttemptMs: Long = Long.MIN_VALUE / 2
     @Volatile private var forceRefresh: Boolean = false
@@ -146,6 +152,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             ttsPlayer.release()
         } catch (e: Exception) {
         }
+        try { deviceTts.release() } catch (_: Exception) { }
         try {
             current?.close()
         } catch (e: Exception) {
@@ -384,7 +391,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 val finalText = tracker.finalText()
                 System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length)
                 listener.onFinal(finalText)
-                speakReplies(tracker.doneMessageIds())
+                speakReplies(tracker.doneMessageIds(), tracker.allText())
             } catch (e: Exception) {
                 System.out.println("MuseGadgetVoice: turn EX " + e.javaClass.simpleName + ": " + e.message)
                 listener.onError(e.message ?: e.javaClass.simpleName)
@@ -405,6 +412,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             ttsPlayer.stop()
         } catch (e: Exception) {
         }
+        try { deviceTts.stop() } catch (_: Exception) { }
     }
 
     /**
@@ -412,10 +420,19 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      * worker thread. A new call cancels the previous one; fetch failures or a
      * dead session skip silently (the text reply already showed).
      */
-    fun speakReplies(messageIds: List<String>) {
+    fun speakReplies(messageIds: List<String>, fallbackText: String = "") {
         stopTtsPlayback()
-        if (messageIds.isEmpty()) return
-        val session = current ?: return
+        if (messageIds.isEmpty() && fallbackText.trim().isEmpty()) return
+        val session = current
+        // Device TTS works without a server session; server TTS needs one.
+        if (session == null) {
+            if (fallbackText.trim().isNotEmpty()) {
+                ttsThread = thread(isDaemon = true, name = "tts-speak") {
+                    try { deviceTts.speak(fallbackText) } catch (_: Exception) { }
+                }
+            }
+            return
+        }
         ttsThread = thread(isDaemon = true, name = "tts-speak") {
             try {
                 for (id in messageIds) {
@@ -432,6 +449,14 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         ttsPlayer.play(mp3)
                     } else {
                         System.out.println("MuseGadgetTts: no audio for reply, skipping")
+                    }
+                }
+                // Fallback: device TTS speaks the reply text directly.
+                if (fallbackText.trim().isNotEmpty()) {
+                    try {
+                        deviceTts.speak(fallbackText)
+                    } catch (e: Exception) {
+                        System.out.println("MuseGadgetTts: device TTS failed: " + e.javaClass.simpleName)
                     }
                 }
             } finally {
