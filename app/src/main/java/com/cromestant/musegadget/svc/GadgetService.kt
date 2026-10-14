@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.net.wifi.WifiManager
 import com.cromestant.musegadget.ble.GattPeripheral
 import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.identity.TokenStore
@@ -68,8 +69,25 @@ class GadgetService : Service() {
                 false
             }
 
-            override fun currentConnectionEntry(): Map<String, Any?> =
-                mapOf("ssid" to "current connection")
+            override fun currentConnectionEntry(): Map<String, Any?> {
+                // Mirror the official client: report the real SSID when known and
+                // mark the entry open (secure=false) so the Muse app skips the
+                // password field -- the device is already online and ignores
+                // whatever credentials come back.
+                val ssid = try {
+                    val wm = getSystemService(WIFI_SERVICE) as WifiManager
+                    wm.connectionInfo?.ssid
+                        ?.removeSurrounding("\"")
+                        ?.takeIf { it.isNotEmpty() && it != "<unknown ssid>" }
+                } catch (e: Exception) {
+                    null
+                }
+                return mapOf(
+                    "ssid" to (ssid ?: "current connection"),
+                    "rssi" to -40,
+                    "secure" to false,
+                )
+            }
         }
         // No-op provision stub: records credentials locally for now.
         val provision: (Credentials, ((() -> Boolean) -> Boolean)) -> Unit = { creds, commit ->
