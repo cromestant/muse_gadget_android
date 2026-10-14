@@ -1,6 +1,7 @@
 package com.cromestant.musegadget.link
 
 import android.content.Context
+import com.cromestant.musegadget.audio.TtsPlayer
 import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.identity.TokenStore
 import okhttp3.OkHttpClient
@@ -59,6 +60,13 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     private val stopFlag = AtomicBoolean(false)
     private var loopThread: Thread? = null
     private val loopLock = Any()
+
+    /**
+     * Spoken-reply player, service-scoped so playback survives activity
+     * recreation. Lazy so unit-test construction never touches Android.
+     */
+    private val ttsPlayer: TtsPlayer by lazy { TtsPlayer(appContext) }
+    @Volatile private var ttsThread: Thread? = null
     @Volatile private var lastRotateAttemptMs: Long = Long.MIN_VALUE / 2
     @Volatile private var forceRefresh: Boolean = false
 
@@ -81,6 +89,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     /** Sets the stop flag, closes the session, joins the loop thread. */
     fun stop() {
         stopFlag.set(true)
+        try {
+            ttsPlayer.release()
+        } catch (e: Exception) {
+        }
         try {
             current?.close()
         } catch (e: Exception) {
@@ -311,11 +323,61 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     } catch (e: Exception) {
                     }
                 }
-                System.out.println("MuseGadgetVoice: turn done finalLen=" + tracker.finalText().length)
-                listener.onFinal(tracker.finalText())
+                val finalText = tracker.finalText()
+                System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length)
+                listener.onFinal(finalText)
+                speakReplies(tracker.doneMessageIds())
             } catch (e: Exception) {
                 System.out.println("MuseGadgetVoice: turn EX " + e.javaClass.simpleName + ": " + e.message)
                 listener.onError(e.message ?: e.javaClass.simpleName)
+            }
+        }
+    }
+
+    /**
+     * Stop spoken-reply playback (PTT barge-in). Also interrupts an in-flight
+     * TTS fetch so a new tap is never talked over.
+     */
+    fun stopTtsPlayback() {
+        try {
+            ttsThread?.interrupt()
+        } catch (e: Exception) {
+        }
+        try {
+            ttsPlayer.stop()
+        } catch (e: Exception) {
+        }
+    }
+
+    /**
+     * Fetch + speak the TTS audio for these chat message ids, in order, on a
+     * worker thread. A new call cancels the previous one; fetch failures or a
+     * dead session skip silently (the text reply already showed).
+     */
+    fun speakReplies(messageIds: List<String>) {
+        stopTtsPlayback()
+        if (messageIds.isEmpty()) return
+        val session = current ?: return
+        ttsThread = thread(isDaemon = true, name = "tts-speak") {
+            try {
+                for (id in messageIds) {
+                    if (Thread.currentThread().isInterrupted) break
+                    System.out.println("MuseGadgetTts: fetching reply audio")
+                    val mp3 = try {
+                        session.fetchTtsMp3(id)
+                    } catch (e: Exception) {
+                        System.out.println("MuseGadgetTts: fetch failed: " + e.javaClass.simpleName)
+                        null
+                    }
+                    if (Thread.currentThread().isInterrupted) break
+                    if (mp3 != null) {
+                        ttsPlayer.play(mp3)
+                    } else {
+                        System.out.println("MuseGadgetTts: no audio for reply, skipping")
+                    }
+                }
+            } finally {
+                if (ttsThread === Thread.currentThread()) ttsThread = null
             }
         }
     }

@@ -284,6 +284,11 @@ class MainActivity : Activity() {
             pttResult.text = "Mic unavailable."
             return
         }
+        // Barge-in: stop any spoken reply before recording the next turn.
+        try {
+            GadgetService.instance?.gadgetLink?.stopTtsPlayback()
+        } catch (_: Exception) {
+        }
         recordStartMs = System.currentTimeMillis()
         pttButton.text = "RECORDING 0.0s — TAP TO STOP"
         pttButton.setBackgroundColor(0xFFCC0000.toInt())

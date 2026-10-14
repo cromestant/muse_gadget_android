@@ -132,6 +132,10 @@ class MuseTurnTracker {
     fun finalText(): String =
         replies.values.filter { it.done }.joinToString("") { it.text }
 
+    /** Message ids of done replies, in arrival order (drives the TTS fetch). */
+    fun doneMessageIds(): List<String> =
+        replies.entries.filter { it.value.done }.map { it.key }
+
     /** Whether any reply message has bound to this turn. */
     fun hasReplies(): Boolean = replies.isNotEmpty()
 

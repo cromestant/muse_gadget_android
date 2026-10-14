@@ -77,6 +77,26 @@ internal fun parseChatEventLine(line: ByteArray): Map<String, Any?>? {
     }
 }
 
+/**
+ * Try each TTS path in order against [get]; return the first 2xx non-empty
+ * body, else null. A throwing [get] counts as a failed attempt. Pure for JVM
+ * testing — the live tunnel GET is injected.
+ */
+internal fun selectTtsAudio(
+    paths: List<String>,
+    get: (String) -> Pair<Int, ByteArray>,
+): ByteArray? {
+    for (path in paths) {
+        val attempt = try {
+            get(path)
+        } catch (e: Exception) {
+            continue
+        }
+        if (attempt.first in 200..299 && attempt.second.isNotEmpty()) return attempt.second
+    }
+    return null
+}
+
 class LinkSession(
     private val noiseHost: String,
     private val vmId: String,
@@ -105,6 +125,8 @@ class LinkSession(
         const val MAX_INLINE_REQUEST_BYTES = 64 * 1024
         const val MAX_VOICE_BYTES = 2_800_000
         const val MAX_CONCURRENT_INVOKES = 4
+        /** Inbound TTS cap, mirroring the 8 MB TTS limit in `link_client.py:61`. */
+        const val MAX_TTS_BYTES = 8 * 1024 * 1024
 
         /**
          * Default command handler: answers `device.health`, rejects the rest.
@@ -334,6 +356,39 @@ class LinkSession(
             text.take(2000)
         }
         return mapOf("ok" to (status in 200..299), "status" to status, "response" to response)
+    }
+
+    /**
+     * Fetch spoken reply audio for a chat message, mirroring the TTS fetch in
+     * `link_client.py:436`: `GET /api/voice/tts-stream?message_id=` (fallback
+     * `/voice/tts-stream`), `Accept: audio/mpeg`, carried by the Noise tunnel
+     * like every other device request. Returns the MP3 bytes, or null when
+     * both paths fail. Bodies are capped at 8 MiB. The audio bytes are never
+     * logged.
+     */
+    fun fetchTtsMp3(messageId: String): ByteArray? {
+        if (messageId.isEmpty()) return null
+        return selectTtsAudio(ttsRequestPaths(messageId), ::tunnelGet)
+    }
+
+    /** One Noise-tunnel GET returning (status, body); throws on transport failure. */
+    private fun tunnelGet(path: String): Pair<Int, ByteArray> {
+        val t = transport ?: throw ConnectionError("Muse session is not connected")
+        val headers = listOf(Header("Accept", "audio/mpeg")) + requestHeaders()
+        val enc = t.encryptHttpRequest("GET", path, headers = headers)
+        val req = PendingRequest(MAX_TTS_BYTES)
+        pending[enc.streamId] = req
+        try {
+            sendFrames(enc.frames)
+            return try {
+                req.done.get(REQUEST_TIMEOUT_S, TimeUnit.SECONDS)
+            } catch (e: Exception) {
+                sendReset(enc.streamId, "consumer closed")
+                throw e
+            }
+        } finally {
+            pending.remove(enc.streamId)
+        }
     }
 
     /** Open the NDJSON chat subscription, mirroring `subscribe_chat` (`link_client.py:392`). */
@@ -602,7 +657,7 @@ class LinkSession(
     }
 
     /** Collects one request/response stream, mirroring `_Request` (`link_client.py:691`). */
-    private inner class PendingRequest {
+    private inner class PendingRequest(private val maxBytes: Int = MAX_RESPONSE_BYTES) {
         val done = CompletableFuture<Pair<Int, ByteArray>>()
         private var status: Int = 0
         private var body = ByteArray(0)
@@ -626,7 +681,7 @@ class LinkSession(
         }
 
         private fun finish() {
-            if (body.size > MAX_RESPONSE_BYTES) {
+            if (body.size > maxBytes) {
                 done.completeExceptionally(IllegalStateException("response too large"))
             } else {
                 done.complete(status to body)

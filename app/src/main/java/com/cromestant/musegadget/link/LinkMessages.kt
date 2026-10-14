@@ -88,14 +88,13 @@ class LinkMessageDecoder {
 }
 
 /**
- * Noise upgrade URL, mirroring `noise_url` in `link_client.py:138`.
- * Percent-encodes every UTF-8 byte except `A-Za-z0-9` and `-_.!~*'()`
- * (mirrors Python `quote(vm_id, safe="-_.!~*'()")`, same as `encodeURIComponent`).
+ * Percent-encode every UTF-8 byte except `A-Za-z0-9` and `-_.!~*'()`
+ * (mirrors Python `quote(s, safe="-_.!~*'()")`, same as `encodeURIComponent`).
  */
-fun noiseUrl(noiseHost: String, vmId: String): String {
+internal fun percentEncode(value: String): String {
     val safe = "-_.!~*'()"
     val sb = StringBuilder()
-    for (byte in vmId.toByteArray(Charsets.UTF_8)) {
+    for (byte in value.toByteArray(Charsets.UTF_8)) {
         val c = byte.toInt() and 0xFF
         val ch = c.toChar()
         if (ch in 'A'..'Z' || ch in 'a'..'z' || ch in '0'..'9' || safe.indexOf(ch) >= 0) {
@@ -106,7 +105,26 @@ fun noiseUrl(noiseHost: String, vmId: String): String {
             sb.append("0123456789ABCDEF"[c and 0xF])
         }
     }
-    return "wss://$noiseHost/v1/noise?vm_id=$sb"
+    return sb.toString()
+}
+
+/**
+ * Noise upgrade URL, mirroring `noise_url` in `link_client.py:138`.
+ */
+fun noiseUrl(noiseHost: String, vmId: String): String =
+    "wss://$noiseHost/v1/noise?vm_id=${percentEncode(vmId)}"
+
+/**
+ * TTS fetch paths, mirroring the TTS fetch in `link_client.py:436`:
+ * `GET /api/voice/tts-stream?message_id=` with fallback `/voice/tts-stream`.
+ * The message id is percent-encoded (ids are server-issued; encode anyway).
+ */
+fun ttsRequestPaths(messageId: String): List<String> {
+    val enc = percentEncode(messageId)
+    return listOf(
+        "/api/voice/tts-stream?message_id=$enc",
+        "/voice/tts-stream?message_id=$enc",
+    )
 }
 
 /**
