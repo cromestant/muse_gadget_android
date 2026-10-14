@@ -14,6 +14,7 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.content.Context
 import android.os.ParcelUuid
+import android.os.SystemClock
 import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.setup.BleTransport
 import java.util.UUID
@@ -50,6 +51,7 @@ class GattPeripheral(
     @Volatile private var mtuValue = ASSUMED_MTU
     @Volatile private var pairedFlag: Byte = 0x00
     @Volatile private var advertising = false
+    @Volatile private var advertiseGeneration = 0
     @Volatile private var txCharacteristic: BluetoothGattCharacteristic? = null
 
     private val advertiseCallback = object : AdvertiseCallback() {
@@ -220,6 +222,7 @@ class GattPeripheral(
     }
 
     fun stop() {
+        advertiseGeneration++
         stopAdvertising()
         try {
             gattServer?.close()
@@ -241,28 +244,46 @@ class GattPeripheral(
         } catch (e: Exception) {
             return
         } ?: return
+        val desiredName = IdentityProtocol.bleName(mac)
         try {
-            adapter.name = IdentityProtocol.bleName(mac)
+            adapter.name = desiredName
         } catch (e: SecurityException) {
             // Best effort: keep the current adapter name.
         }
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
-            .setConnectable(true)
-            .build()
-        val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(UUID.fromString(BleUuids.SERVICE_UUID)))
-            .addManufacturerData(BleUuids.PAIRED_FLAG_COMPANY_ID, byteArrayOf(pairedFlag))
-            .setIncludeTxPowerLevel(false)
-            .build()
-        val scanResponse = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
-            .build()
-        try {
-            advertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
-        } catch (e: Exception) {
-            advertising = false
+        // The adapter rename is asynchronous, but the scan response resolves
+        // setIncludeDeviceName(true) at startAdvertising time. If we broadcast
+        // immediately, the STALE name goes on air and the Muse app's
+        // name-prefixed scan never matches. Wait (off the main thread) until
+        // the new name reads back before broadcasting.
+        val generation = ++advertiseGeneration
+        scheduler.execute {
+            val deadline = SystemClock.elapsedRealtime() + 3000
+            while (SystemClock.elapsedRealtime() < deadline) {
+                if (generation != advertiseGeneration) return@execute // superseded
+                val current = try { adapter.name } catch (e: Exception) { null }
+                if (current == desiredName) break
+                try { Thread.sleep(150) } catch (e: InterruptedException) { return@execute }
+            }
+            if (generation != advertiseGeneration) return@execute
+            if (gattServer == null) return@execute // stopped while waiting
+            val settings = AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
+                .setConnectable(true)
+                .build()
+            val data = AdvertiseData.Builder()
+                .addServiceUuid(ParcelUuid(UUID.fromString(BleUuids.SERVICE_UUID)))
+                .addManufacturerData(BleUuids.PAIRED_FLAG_COMPANY_ID, byteArrayOf(pairedFlag))
+                .setIncludeTxPowerLevel(false)
+                .build()
+            val scanResponse = AdvertiseData.Builder()
+                .setIncludeDeviceName(true)
+                .build()
+            try {
+                advertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
+            } catch (e: Exception) {
+                advertising = false
+            }
         }
     }
 
