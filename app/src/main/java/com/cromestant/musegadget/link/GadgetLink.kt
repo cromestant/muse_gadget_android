@@ -380,6 +380,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             is TurnEvent.Reply -> {
                                 listener.onPartial(te.text)
                                 spokenText = te.text
+                                if (te.done && te.text.trim().isNotEmpty()) {
+                                    deviceTts?.speak(te.text.trim())
+                                    spokenText = ""
+                                }
                             }
                             is TurnEvent.AgentStatus -> {}
                             TurnEvent.TaskFinished -> {}
