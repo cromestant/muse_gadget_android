@@ -107,7 +107,11 @@ class MainActivity : Activity() {
             textSize = 24f
             minimumHeight = 220
         }
-        pttResult = TextView(this)
+        pttResult = TextView(this).apply {
+            textSize = 26f
+            setLineSpacing(8f, 1.15f)
+            setPadding(24, 24, 24, 24)
+        }
         refreshBtn = Button(this).apply { text = "Refresh status" }
 
         tokenSave.setOnClickListener { saveToken() }
