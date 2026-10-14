@@ -83,7 +83,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
          * dedicated chat via session_id instead of the shared main chat.
          * Set false to revert to the null-session (shared chat) behavior.
          */
-        const val USE_DEDICATED_CHAT_SESSION = false
+        const val USE_DEDICATED_CHAT_SESSION = true
         private const val CHAT_SESSION_ID_KEY = "gadget_chat_session_id"
     }
 
