@@ -242,9 +242,15 @@ class SetupController(
     }
 
     private fun runProvision(credentials: Credentials, generation: Long) {
+        System.out.println("MuseGadgetProvision: runProvision entered generation=$generation")
         try {
             sendStatus("wifi_connecting", generation)
-            if (!network.isOnline()) {
+            val online = try { network.isOnline() } catch (e: Exception) {
+                System.err.println("MuseGadgetProvision: isOnline threw ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            System.out.println("MuseGadgetProvision: isOnline=$online")
+            if (!online) {
                 // Stay in provisioning so the app can retry, as the firmware does.
                 pairing.extendProvisioning(generation)
                 sendStatus("wifi_failed", generation)
@@ -254,6 +260,7 @@ class SetupController(
             val commit: ((() -> Boolean) -> Boolean) = { save ->
                 pairing.commitProvisioning(generation, save)
             }
+            System.out.println("MuseGadgetProvision: calling provision lambda")
             try {
                 provision(credentials, commit)
             } catch (e: ProvisionFailed) {
@@ -262,6 +269,7 @@ class SetupController(
                 return
             }
             sendStatus("auth_ok", generation)
+            System.out.println("MuseGadgetProvision: auth_ok sent, completing")
             onComplete()
         } finally {
             synchronized(stateLock) { _provisioning = false }
