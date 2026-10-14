@@ -63,7 +63,7 @@ internal fun parseChatEventLine(line: ByteArray): Map<String, Any?>? {
     } catch (e: Exception) {
         return null
     }
-    if (text.isBlank()) return null
+    if (text.trim().isEmpty()) return null
     val event = try {
         Json.parse(text)
     } catch (e: Exception) {

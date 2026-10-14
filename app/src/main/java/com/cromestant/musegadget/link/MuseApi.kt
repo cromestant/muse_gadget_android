@@ -104,7 +104,7 @@ object MuseApi {
                     val e = entry as Map<String, Any?>
                     val vmUrl = (e["vm_ws_url"] as? String ?: e["vm_url"] as? String ?: "")
                     val vmToken = e["vm_auth_token"] as? String ?: ""
-                    if (vmUrl.isBlank() || vmToken.isBlank()) continue
+                    if (vmUrl.trim().isEmpty() || vmToken.trim().isEmpty()) continue
                     vms.add(
                         VmInfo(
                             vmUrl = vmUrl,
@@ -163,7 +163,7 @@ object MuseApi {
                 val m = data as Map<String, Any?>
                 val access = m["access_token"] as? String ?: ""
                 val refresh = m["refresh_token"] as? String ?: ""
-                if (access.isBlank() || refresh.isBlank()) return null to status
+                if (access.trim().isEmpty() || refresh.trim().isEmpty()) return null to status
                 return DeviceTokens(access, refresh) to 200
             }
         } catch (e: Exception) {

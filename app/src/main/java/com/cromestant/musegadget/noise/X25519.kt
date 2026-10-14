@@ -79,7 +79,7 @@ object X25519 {
             val tx = x2; x2 = x3; x3 = tx
             val tz = z2; z2 = z3; z3 = tz
         }
-        val z2Inv = z2.modPow(FIELD_P.subtract(BigInteger.TWO), FIELD_P)
+        val z2Inv = z2.modPow(FIELD_P.subtract(BigInteger.valueOf(2)), FIELD_P)
         return bigToLe(x2.multiply(z2Inv).mod(FIELD_P))
     }
 
