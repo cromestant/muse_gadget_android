@@ -122,7 +122,8 @@ class MuseTurnTracker {
         val name = event["event"] as? String ?: return emptyList()
         if (name == "agent.status" || name == "task.status") return status(name, payload)
         if (name == "delta.message_start" || name == "delta.text_append" ||
-            name == "delta.message_done" || name == "message.assistant"
+            name == "delta.message_done" || name == "message.assistant" ||
+            name == "delta.presentation"
         ) {
             return message(name, event, payload)
         }
@@ -241,6 +242,17 @@ class MuseTurnTracker {
             if (name == "delta.message_done" || payload["display_text_ready"] != false) {
                 reply.done = true
             }
+        }
+        if (name == "delta.presentation") {
+            val data = payload["data"] as? Map<*, *>
+            val fallback = data?.get("fallback_text") as? String
+                ?: payload["fallback_text"] as? String ?: ""
+            if (fallback.isNotEmpty()) {
+                val clean = stripControls(fallback)
+                if (reply.text.isEmpty()) reply.text = clean else reply.text += clean
+                reply.streamed += clean
+            }
+            reply.done = true
         }
         if (reply.text.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES ||
             reply.streamed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES

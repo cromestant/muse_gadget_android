@@ -368,6 +368,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 val sub = session.subscribeChat(chatSessionId)
                 try {
                     val deadline = System.currentTimeMillis() + 90_000
+                    var spokenText = ""
                     while (System.currentTimeMillis() < deadline) {
                         val ev = try {
                             sub.nextEvent(5_000)
@@ -376,12 +377,17 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         } ?: continue
                         System.out.println("MuseGadgetVoice: " + describeChatEvent(ev))
                         for (te in tracker.feed(ev)) when (te) {
-                            is TurnEvent.Reply -> listener.onPartial(te.text)
+                            is TurnEvent.Reply -> {
+                                listener.onPartial(te.text)
+                                spokenText = te.text
+                            }
                             is TurnEvent.AgentStatus -> {}
                             TurnEvent.TaskFinished -> {}
                         }
                         if (tracker.complete()) break
                     }
+                    val toSpeak = spokenText.trim()
+                    if (toSpeak.isNotEmpty()) deviceTts?.speak(toSpeak)
                 } finally {
                     try {
                         sub.close()
