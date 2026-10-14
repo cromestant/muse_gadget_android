@@ -12,6 +12,7 @@ import android.net.wifi.WifiManager
 import com.cromestant.musegadget.ble.GattPeripheral
 import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.identity.TokenStore
+import com.cromestant.musegadget.link.GadgetLink
 import com.cromestant.musegadget.pairing.PairingSession
 import com.cromestant.musegadget.setup.Credentials
 import com.cromestant.musegadget.setup.DeviceIdentity
@@ -44,6 +45,10 @@ class GadgetService : Service() {
     private var mac: String = ""
     @Volatile private var supported: Boolean = false
     @Volatile private var paired: Boolean = false
+
+    /** Link session orchestrator; created in onCreate, started/stopped with the service. */
+    lateinit var gadgetLink: GadgetLink
+        private set
 
     inner class LocalBinder : Binder() {
         fun service(): GadgetService = this@GadgetService
@@ -97,7 +102,19 @@ class GadgetService : Service() {
                     .putString("username", creds.username)
                     .putString("api_url_v2", creds.apiUrlV2)
                     .putString("noise_host", creds.noiseHost)
+                    .putString("access_token", creds.accessToken)
+                    .putString("refresh_token", creds.refreshToken)
+                    .putLong("token_issued_at", System.currentTimeMillis())
                     .apply()
+            }
+        }
+        gadgetLink = GadgetLink(this).also { link ->
+            link.onUnpaired = {
+                paired = false
+                try {
+                    peripheral?.setPaired(false)
+                } catch (_: Exception) {
+                }
             }
         }
         // Peripheral needs onMessage/onDisconnect wired to the controller;
@@ -122,6 +139,8 @@ class GadgetService : Service() {
         } catch (e: Exception) {
             false
         }
+        // Waits for provisioning internally; safe to start unconditionally.
+        gadgetLink.start()
         startFg()
     }
 
@@ -170,6 +189,12 @@ class GadgetService : Service() {
 
     fun isPaired(): Boolean = paired
 
+    fun isProvisioned(): Boolean = try {
+        gadgetLink.isProvisioned()
+    } catch (e: Exception) {
+        false
+    }
+
     fun bleName(): String = try {
         IdentityProtocol.bleName(mac)
     } catch (e: Exception) {
@@ -177,6 +202,7 @@ class GadgetService : Service() {
     }
 
     override fun onDestroy() {
+        try { gadgetLink.stop() } catch (e: Exception) { }
         try { setup?.stop() } catch (e: Exception) { }
         try { peripheral?.stop() } catch (e: Exception) { }
         if (instance === this) instance = null

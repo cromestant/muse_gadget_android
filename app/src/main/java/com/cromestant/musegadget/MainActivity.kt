@@ -18,9 +18,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.cromestant.musegadget.audio.AndroidPcmSource
-import com.cromestant.musegadget.audio.FakeVoiceTransport
+import com.cromestant.musegadget.audio.LinkVoiceTransport
 import com.cromestant.musegadget.audio.PttController
 import com.cromestant.musegadget.identity.TokenStore
+import com.cromestant.musegadget.link.VoiceTurnListener
 import com.cromestant.musegadget.svc.GadgetService
 
 /**
@@ -59,7 +60,26 @@ class MainActivity : Activity() {
     private lateinit var refreshBtn: Button
 
     private var ptt: PttController? = null
-    private val voiceTransport = FakeVoiceTransport()
+    private val voiceListener = object : VoiceTurnListener {
+        override fun onAck() {
+            ui.post { pttResult.text = "${pttResult.text}\n(sent, listening...)" }
+        }
+
+        override fun onPartial(text: String) {
+            ui.post { pttResult.text = "Muse: $text" }
+        }
+
+        override fun onFinal(text: String) {
+            ui.post { pttResult.text = if (text.isEmpty()) "(no reply text)" else "Muse: $text" }
+        }
+
+        override fun onError(error: String) {
+            ui.post { pttResult.text = "Link error: $error" }
+        }
+    }
+    private val voiceTransport: LinkVoiceTransport by lazy {
+        LinkVoiceTransport(link = { GadgetService.instance?.gadgetLink }, listener = voiceListener)
+    }
     private var ticking = false
     private var recordStartMs = 0L
 
@@ -269,7 +289,7 @@ class MainActivity : Activity() {
     private fun showCapture(c: PttController, auto: Boolean) {
         val info = c.lastCaptureInfo ?: return
         val secs = info.durationMs / 1000.0
-        pttResult.text = "Captured ${"%.1f".format(secs)}s, ${info.pcmBytes}B PCM -> ${info.b64Chars} base64 chars voice_note (queued — link layer not built yet, nothing sent)${if (auto) " [auto-stop]" else ""}"
+        pttResult.text = "Captured ${"%.1f".format(secs)}s, ${info.pcmBytes}B PCM -> ${info.b64Chars} base64 chars voice_note (sending via gadget link...)${if (auto) " [auto-stop]" else ""}"
     }
 
     private fun startTick() {

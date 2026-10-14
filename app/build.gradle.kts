@@ -37,6 +37,7 @@ android {
 
 dependencies {
     // No Play Services, no Firebase, no gms — ever. Main has zero deps.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }
