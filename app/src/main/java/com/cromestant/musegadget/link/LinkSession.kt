@@ -96,6 +96,12 @@ internal fun selectTtsAudio(
         }
         System.out.println("MuseGadgetTts: " + path.substringBefore('?') +
             " -> HTTP " + attempt.first + " (" + attempt.second.size + " bytes)")
+        if (attempt.first !in 200..299 && attempt.second.isNotEmpty()) {
+            val bodyText = try {
+                attempt.second.toString(Charsets.UTF_8).take(300).replace("\n", " ")
+            } catch (e: Exception) { "<undecodable>" }
+            System.out.println("MuseGadgetTts: error body: " + bodyText)
+        }
         if (attempt.first in 200..299 && attempt.second.isNotEmpty()) return attempt.second
     }
     return null
