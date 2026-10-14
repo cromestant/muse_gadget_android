@@ -48,6 +48,11 @@ internal fun describeChatEvent(ev: Map<String, Any?>): String {
     val sb = StringBuilder("event name=").append(name)
     if (mid != null) sb.append(" msg=").append(mid.take(12))
     if (replyTo != null) sb.append(" replyTo=").append(replyTo.take(12))
+    if (name == "delta.message_start" && payload != null) {
+        sb.append(" keys=").append(payload.keys.joinToString(","))
+        val idVal = payload["id"] as? String
+        if (idVal != null) sb.append(" id=").append(idVal.take(20))
+    }
     return sb.toString()
 }
 
