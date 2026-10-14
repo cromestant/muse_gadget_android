@@ -57,6 +57,14 @@ class MuseTurnTracker {
     var lastActivityMs: Long = System.currentTimeMillis()
         private set
 
+    /**
+     * session_id echoed by the /chat/stream acknowledgement, when the server
+     * sends one. Captured for tracing only — correlation still uses the
+     * acknowledged user message ids.
+     */
+    var ackSessionId: String? = null
+        private set
+
     companion object {
         private val TERMINAL_STATUSES = setOf("completed", "failed", "errored", "cancelled", "canceled")
         private const val MAX_PENDING_EVENTS = 64
@@ -85,6 +93,8 @@ class MuseTurnTracker {
         if (ids.isEmpty()) throw IllegalArgumentException("Muse chat acknowledgement omitted the user message ID")
         userIds.clear()
         userIds.addAll(ids)
+        ackSessionId = (result["session_id"] as? String)?.takeIf { it.isNotEmpty() }
+            ?: (response["session_id"] as? String)?.takeIf { it.isNotEmpty() }
         acknowledged = true
         val held = pending.toList()
         pending.clear()

@@ -90,12 +90,38 @@ internal fun selectTtsAudio(
         val attempt = try {
             get(path)
         } catch (e: Exception) {
+            System.out.println("MuseGadgetTts: " + path.substringBefore('?') +
+                " threw " + e.javaClass.simpleName)
             continue
         }
+        System.out.println("MuseGadgetTts: " + path.substringBefore('?') +
+            " -> HTTP " + attempt.first + " (" + attempt.second.size + " bytes)")
         if (attempt.first in 200..299 && attempt.second.isNotEmpty()) return attempt.second
     }
     return null
 }
+
+/**
+ * Pure chat/stream request body: the voice-note frame plus device_id and the
+ * optional gadget chat session_id. Extracted for JVM testing.
+ */
+internal fun buildChatStreamBody(
+    parsed: Map<String, Any?>,
+    nodeId: String,
+    sessionId: String?,
+): Map<String, Any?> {
+    val bodyMap = LinkedHashMap<String, Any?>(parsed)
+    bodyMap["device_id"] = nodeId
+    if (sessionId != null) bodyMap["session_id"] = sessionId
+    return bodyMap
+}
+
+/**
+ * Pure chat/subscribe request body: just the optional session_id. Extracted
+ * for JVM testing.
+ */
+internal fun buildChatSubscribeBody(sessionId: String?): Map<String, Any?> =
+    if (sessionId != null) mapOf("session_id" to sessionId) else emptyMap()
 
 class LinkSession(
     private val noiseHost: String,
@@ -345,9 +371,7 @@ class LinkSession(
         }
         if (parsed !is Map<*, *>) throw IllegalArgumentException("voice note is not a JSON object")
         @Suppress("UNCHECKED_CAST")
-        val bodyMap = LinkedHashMap<String, Any?>(parsed as Map<String, Any?>)
-        bodyMap["device_id"] = nodeId
-        if (sessionId != null) bodyMap["session_id"] = sessionId
+        val bodyMap = buildChatStreamBody(parsed as Map<String, Any?>, nodeId, sessionId)
         val (status, respBody) = postChat(Json.stringify(bodyMap).toByteArray(Charsets.UTF_8))
         val text = respBody.toString(Charsets.UTF_8)
         val response: Any? = try {
@@ -394,7 +418,7 @@ class LinkSession(
     /** Open the NDJSON chat subscription, mirroring `subscribe_chat` (`link_client.py:392`). */
     fun subscribeChat(sessionId: String?): ChatSubscription {
         val t = transport ?: throw ConnectionError("Muse session is not connected")
-        val bodyMap: Map<String, Any?> = if (sessionId != null) mapOf("session_id" to sessionId) else emptyMap()
+        val bodyMap: Map<String, Any?> = buildChatSubscribeBody(sessionId)
         val body = Json.stringify(bodyMap).toByteArray(Charsets.UTF_8)
         val headers = listOf(
             Header("Content-Type", "application/json"),

@@ -9,6 +9,7 @@ import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.pow
+import java.util.UUID
 
 /**
  * Session orchestrator, port of the reconnect loop in
@@ -23,6 +24,31 @@ interface VoiceTurnListener {
     fun onPartial(text: String)
     fun onFinal(text: String)
     fun onError(error: String)
+}
+
+
+/**
+ * Pure provision check: the same rule as [GadgetLink.isProvisioned], factored
+ * out so JVM tests can cover it without Android SharedPreferences.
+ */
+internal fun isProvisionedSnapshot(noiseHost: String?, accessToken: String?, refreshToken: String?): Boolean =
+    !noiseHost.isNullOrEmpty() && !accessToken.isNullOrEmpty() && !refreshToken.isNullOrEmpty()
+
+/**
+ * One-line trace summary of a chat NDJSON event: event name plus truncated
+ * message/parent ids. Never includes text content.
+ */
+internal fun describeChatEvent(ev: Map<String, Any?>): String {
+    val name = ev["event"] as? String ?: "?"
+    @Suppress("UNCHECKED_CAST")
+    val payload = ev["payload"] as? Map<String, Any?>
+    val mid = payload?.get("message_id") as? String
+    val replyTo = (payload?.get("reply_to_message_id") as? String)
+        ?: (payload?.get("parent_message_id") as? String)
+    val sb = StringBuilder("event name=").append(name)
+    if (mid != null) sb.append(" msg=").append(mid.take(12))
+    if (replyTo != null) sb.append(" replyTo=").append(replyTo.take(12))
+    return sb.toString()
 }
 
 /** Reconnect delay math, mirroring `Backoff.next_delay` in `service.py:61`. */
@@ -42,6 +68,13 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         const val AUTH_BACKOFF_MIN_S = 15.0
         const val HEALTHY_SESSION_S = 30L
         const val UNPROVISIONED_POLL_MS = 5000L
+        /**
+         * Sub-chat experiment (2026-10-14): route gadget voice turns to a
+         * dedicated chat via session_id instead of the shared main chat.
+         * Set false to revert to the null-session (shared chat) behavior.
+         */
+        const val USE_DEDICATED_CHAT_SESSION = true
+        private const val CHAT_SESSION_ID_KEY = "gadget_chat_session_id"
     }
 
     private val appContext = context.applicationContext
@@ -72,9 +105,24 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
 
     fun isProvisioned(): Boolean {
         val p = prefs
-        return !p.getString("noise_host", "").isNullOrEmpty() &&
-            !p.getString("access_token", "").isNullOrEmpty() &&
-            !p.getString("refresh_token", "").isNullOrEmpty()
+        return isProvisionedSnapshot(
+            p.getString("noise_host", ""),
+            p.getString("access_token", ""),
+            p.getString("refresh_token", ""),
+        )
+    }
+
+    /**
+     * Stable per-device gadget chat session id, generated once and persisted.
+     * Used as session_id on chat/stream + chat/subscribe when
+     * USE_DEDICATED_CHAT_SESSION is true.
+     */
+    fun gadgetChatSessionId(): String {
+        val existing = prefs.getString(CHAT_SESSION_ID_KEY, "")
+        if (!existing.isNullOrEmpty()) return existing
+        val fresh = UUID.randomUUID().toString()
+        prefs.edit().putString(CHAT_SESSION_ID_KEY, fresh).apply()
+        return fresh
     }
 
     /** Idempotent; launches the loop thread. */
@@ -289,7 +337,9 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             }
             System.out.println("MuseGadgetVoice: session present, posting chat/stream")
             try {
-                val ack = session.sendVoiceNoteJson(json)
+                val chatSessionId = if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
+                System.out.println("MuseGadgetVoice: chatSession=" + (chatSessionId?.take(8) ?: "shared"))
+                val ack = session.sendVoiceNoteJson(json, chatSessionId)
                 System.out.println("MuseGadgetVoice: chat/stream ack ok=" + ack["ok"] + " status=" + ack["status"])
                 if (ack["ok"] != true) {
                     listener.onError("chat/stream HTTP ${ack["status"]}")
@@ -299,9 +349,11 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 val body = ack["response"] as? Map<String, Any?> ?: emptyMap()
                 val tracker = MuseTurnTracker()
                 tracker.acknowledge(body)
+                System.out.println("MuseGadgetVoice: ack keys=" + body.keys.joinToString(",") +
+                    " ackSession=" + (tracker.ackSessionId?.take(8) ?: "none"))
                 listener.onAck()
                 System.out.println("MuseGadgetVoice: acked, subscribing")
-                val sub = session.subscribeChat(null)
+                val sub = session.subscribeChat(chatSessionId)
                 try {
                     val deadline = System.currentTimeMillis() + 90_000
                     while (System.currentTimeMillis() < deadline) {
@@ -310,6 +362,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         } catch (e: Exception) {
                             throw e
                         } ?: continue
+                        System.out.println("MuseGadgetVoice: " + describeChatEvent(ev))
                         for (te in tracker.feed(ev)) when (te) {
                             is TurnEvent.Reply -> listener.onPartial(te.text)
                             is TurnEvent.AgentStatus -> {}

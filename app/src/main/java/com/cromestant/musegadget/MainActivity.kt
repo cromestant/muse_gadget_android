@@ -246,7 +246,7 @@ class MainActivity : Activity() {
             tokenInput.isEnabled = true
             tokenSave.isEnabled = true
         }
-        statusView.text = "BLE: ${svc.bleName()} | advertising=${svc.isAdvertising()} | paired=${svc.isPaired()}"
+        statusView.text = "BLE: ${svc.bleName()} | advertising=${svc.isAdvertising()} | paired=${svc.isPaired()} | provisioned=${svc.isProvisioned()}"
     }
 
     // ---- PTT ----
