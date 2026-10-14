@@ -6,3 +6,4 @@ captures
 .externalNativeBuild
 *.apk
 *.aab
+muse_token.txt
