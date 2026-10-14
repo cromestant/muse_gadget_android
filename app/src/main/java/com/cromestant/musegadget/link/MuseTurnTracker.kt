@@ -245,9 +245,22 @@ class MuseTurnTracker {
         }
         if (name == "delta.presentation") {
             val data = payload["data"] as? Map<*, *>
-            val fallback = data?.get("fallback_text") as? String
-                ?: payload["fallback_text"] as? String ?: ""
-            if (fallback.isNotEmpty()) {
+            var fallback: String? = data?.get("fallback_text") as? String
+            if (fallback == null) {
+                // audio/video/image are nested: data.audio.fallback_text etc.
+                for (key in listOf("audio", "videos", "images")) {
+                    val section = data?.get(key)
+                    val candidates = if (section is List<*>) section else listOf(section)
+                    for (c in candidates) {
+                        val m = c as? Map<*, *>
+                        val ft = m?.get("fallback_text") as? String
+                        if (!ft.isNullOrEmpty()) { fallback = ft; break }
+                    }
+                    if (!fallback.isNullOrEmpty()) break
+                }
+            }
+            if (fallback == null) fallback = payload["fallback_text"] as? String
+            if (!fallback.isNullOrEmpty()) {
                 val clean = stripControls(fallback)
                 if (reply.text.isEmpty()) reply.text = clean else reply.text += clean
                 reply.streamed += clean
