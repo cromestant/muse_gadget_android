@@ -1,6 +1,5 @@
 package com.cromestant.musegadget.setup
 
-import android.util.Log
 
 import com.cromestant.musegadget.ble.ChunkFraming
 import com.cromestant.musegadget.common.Json
@@ -199,7 +198,7 @@ class SetupController(
 
     private fun handleProvision(command: Map<String, Any?>) {
         val keyTypes = command.entries.joinToString { (k, v) -> "$k:${v?.javaClass?.simpleName}" }
-        Log.i("MuseGadgetProvision", "provision_v2 received keys=[$keyTypes]")
+        System.out.println("MuseGadgetProvision: provision_v2 received keys=[$keyTypes]")
         fun text(key: String): String = command[key] as? String ?: ""
         if (command["ssid"] !is String ||
             command["password"] !is String ||
@@ -207,11 +206,11 @@ class SetupController(
             text("refresh_token").isEmpty() ||
             text("token_type") != "device"
         ) {
-            Log.w("MuseGadgetProvision", "provision_v2 validation FAILED")
+            System.err.println("MuseGadgetProvision: provision_v2 validation FAILED")
             sendStatus("error_missing_credentials")
             return
         }
-        Log.i("MuseGadgetProvision", "provision_v2 validation passed")
+        System.out.println("MuseGadgetProvision: provision_v2 validation passed")
         var generation = 0L
         val refusal: String?
         synchronized(stateLock) {
