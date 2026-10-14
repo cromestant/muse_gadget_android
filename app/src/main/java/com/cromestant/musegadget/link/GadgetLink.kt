@@ -269,12 +269,16 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      */
     fun sendVoiceTurn(json: String, listener: VoiceTurnListener) {
         thread(isDaemon = true, name = "voice-turn") {
+            System.out.println("MuseGadgetVoice: voice-turn thread started")
             val session = current ?: run {
+                System.out.println("MuseGadgetVoice: no session -> not connected")
                 listener.onError("not connected to Muse")
                 return@thread
             }
+            System.out.println("MuseGadgetVoice: session present, posting chat/stream")
             try {
                 val ack = session.sendVoiceNoteJson(json)
+                System.out.println("MuseGadgetVoice: chat/stream ack ok=" + ack["ok"] + " status=" + ack["status"])
                 if (ack["ok"] != true) {
                     listener.onError("chat/stream HTTP ${ack["status"]}")
                     return@thread
@@ -284,6 +288,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 val tracker = MuseTurnTracker()
                 tracker.acknowledge(body)
                 listener.onAck()
+                System.out.println("MuseGadgetVoice: acked, subscribing")
                 val sub = session.subscribeChat(null)
                 try {
                     val deadline = System.currentTimeMillis() + 90_000
@@ -306,8 +311,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     } catch (e: Exception) {
                     }
                 }
+                System.out.println("MuseGadgetVoice: turn done finalLen=" + tracker.finalText().length)
                 listener.onFinal(tracker.finalText())
             } catch (e: Exception) {
+                System.out.println("MuseGadgetVoice: turn EX " + e.javaClass.simpleName + ": " + e.message)
                 listener.onError(e.message ?: e.javaClass.simpleName)
             }
         }

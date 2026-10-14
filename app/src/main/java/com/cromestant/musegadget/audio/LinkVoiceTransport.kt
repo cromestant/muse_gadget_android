@@ -13,6 +13,9 @@ class LinkVoiceTransport(
     private val listener: VoiceTurnListener,
 ) : VoiceTransport {
     override fun sendVoiceNote(json: String) {
-        (link() ?: run { listener.onError("gadget link not ready"); return }).sendVoiceTurn(json, listener)
+        System.out.println("MuseGadgetVoice: sendVoiceNote len=" + json.length)
+        val l = link()
+        System.out.println("MuseGadgetVoice: gadgetLink " + (if (l == null) "NULL" else "present"))
+        (l ?: run { listener.onError("gadget link not ready"); return }).sendVoiceTurn(json, listener)
     }
 }
