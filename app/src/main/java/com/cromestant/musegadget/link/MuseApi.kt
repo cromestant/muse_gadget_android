@@ -62,6 +62,11 @@ object MuseApi {
         return "Bearer $deviceId:$raw"
     }
 
+    /** Alternate format: raw token alone. Tried when the device-bound format gets 401. */
+    fun refreshAuthHeaderRaw(refreshToken: String): String {
+        return "Bearer " + refreshToken.substringAfterLast(":")
+    }
+
     /**
      * Leased VMs plus the HTTP status, mirroring `fetch_vms_with_status` in
      * `muse_api.py:59`. Returns `(vms, status)`; `(emptyList(), null)` on
@@ -125,7 +130,8 @@ object MuseApi {
     /**
      * Rotate the device token pair, mirroring `refresh_device_token` in
      * `muse_api.py:137`. The access token is never presented on this
-     * endpoint (see `muse_api.py:148-150`). 401 means re-pair.
+     * endpoint (see `muse_api.py:148-150`). Tries the device-bound auth
+     * header first, then the raw-token format; 401 on both means re-pair.
      * Returns `(tokens, status)`; `(null, null)` on transport failure.
      */
     fun refreshDeviceToken(
@@ -136,39 +142,62 @@ object MuseApi {
     ): Pair<DeviceTokens?, Int?> {
         val body = Json.stringify(mapOf("device_id" to deviceId))
             .toRequestBody("application/json".toMediaType())
-        val req = Request.Builder()
-            .url(root + REFRESH_PATH)
-            .header("Authorization", refreshAuthHeader(deviceId, refreshToken))
-            .header("User-Agent", userAgent())
-            .post(body)
-            .build()
-        try {
-            http.newCall(req).execute().use { resp ->
-                val status = resp.code
-                if (status == 401) return null to 401
-                if (!resp.isSuccessful) return null to status
-                val text = try {
-                    resp.body?.string() ?: return null to status
-                } catch (e: Exception) {
-                    return null to null
+        val headers = listOf(
+            refreshAuthHeader(deviceId, refreshToken),
+            refreshAuthHeaderRaw(refreshToken)
+        )
+        var lastStatus: Int? = null
+        for ((i, authHeader) in headers.withIndex()) {
+            val req = Request.Builder()
+                .url(root + REFRESH_PATH)
+                .header("Authorization", authHeader)
+                .header("User-Agent", userAgent())
+                .post(body)
+                .build()
+            try {
+                http.newCall(req).execute().use { resp ->
+                    val status = resp.code
+                    System.out.println("MuseGadgetAuth: refresh attempt " + (i + 1) +
+                        " -> HTTP " + status)
+                    if (status == 401 || !resp.isSuccessful) {
+                        lastStatus = status
+                        return@use
+                    }
+                    val parsed = parseRefreshResponse(resp)
+                    if (parsed != null) {
+                        System.out.println("MuseGadgetAuth: refresh succeeded on attempt " + (i + 1))
+                        return parsed to status
+                    }
+                    lastStatus = status
                 }
-                var data: Any? = try {
-                    Json.parse(text)
-                } catch (e: Exception) {
-                    return null to null
-                }
-                if (data is Map<*, *> && data["payload"] is Map<*, *>) data = data["payload"]
-                if (data !is Map<*, *>) return null to status
-                @Suppress("UNCHECKED_CAST")
-                val m = data as Map<String, Any?>
-                val access = m["access_token"] as? String ?: ""
-                val refresh = m["refresh_token"] as? String ?: ""
-                if (access.trim().isEmpty() || refresh.trim().isEmpty()) return null to status
-                return DeviceTokens(access, refresh) to 200
+            } catch (e: Exception) {
+                System.out.println("MuseGadgetAuth: refresh attempt " + (i + 1) +
+                    " threw " + e.javaClass.simpleName)
             }
-        } catch (e: Exception) {
-            return null to null
         }
+        return null to lastStatus
+    }
+
+    /** Parse a successful refresh response into tokens, or null if malformed. */
+    private fun parseRefreshResponse(resp: okhttp3.Response): DeviceTokens? {
+        val text = try {
+            resp.body?.string() ?: return null
+        } catch (e: Exception) {
+            return null
+        }
+        var data: Any? = try {
+            Json.parse(text)
+        } catch (e: Exception) {
+            return null
+        }
+        if (data is Map<*, *> && data["payload"] is Map<*, *>) data = data["payload"]
+        if (data !is Map<*, *>) return null
+        @Suppress("UNCHECKED_CAST")
+        val m = data as Map<String, Any?>
+        val access = m["access_token"] as? String ?: ""
+        val refresh = m["refresh_token"] as? String ?: ""
+        if (access.trim().isEmpty() || refresh.trim().isEmpty()) return null
+        return DeviceTokens(access, refresh)
     }
 
     /** Shared HTTP client: 15 s timeouts, 20 s WS ping (mirrors `PING_INTERVAL_S`). */

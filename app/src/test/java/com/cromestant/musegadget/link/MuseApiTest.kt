@@ -26,4 +26,10 @@ class MuseApiTest {
     fun refreshAuthHeaderWithoutPrefix() {
         assertEquals("Bearer dev1:abc", MuseApi.refreshAuthHeader("dev1", "abc"))
     }
+
+    @Test
+    fun refreshAuthHeaderRawFormat() {
+        assertEquals("Bearer abc", MuseApi.refreshAuthHeaderRaw("hatch_refresh:abc"))
+        assertEquals("Bearer abc", MuseApi.refreshAuthHeaderRaw("abc"))
+    }
 }
