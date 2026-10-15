@@ -57,16 +57,11 @@ object MuseApi {
      * server 401s, the documented alternate is `Bearer $raw` alone.
      * The format is isolated in this one function so the live test can flip it.
      */
-    fun refreshAuthHeader(deviceId: String, refreshToken: String): String {
+    fun refreshAuthHeader(refreshToken: String): String {
         // SDK: Bearer hatch_refresh:<raw> where raw = token without prefix.
         // The "hatch_refresh:" prefix is literal, NOT the device ID.
         val raw = refreshToken.substringAfterLast(":")
         return "Bearer hatch_refresh:$raw"
-    }
-
-    /** Alternate format: raw token alone. Tried when the device-bound format gets 401. */
-    fun refreshAuthHeaderRaw(refreshToken: String): String {
-        return "Bearer " + refreshToken.substringAfterLast(":")
     }
 
     /**
@@ -146,7 +141,7 @@ object MuseApi {
             .toRequestBody("application/json".toMediaType())
         // SDK tries once with Bearer <redacted>:<raw> (prefix stripped).
         // A 401 means the pairing is revoked, not a format issue.
-        val authHeader = refreshAuthHeader(deviceId, refreshToken)
+        val authHeader = refreshAuthHeader(refreshToken)
         var lastStatus: Int? = null
         run {
             val req = Request.Builder()

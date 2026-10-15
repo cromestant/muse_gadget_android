@@ -420,7 +420,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         val root = MuseApi.apiRoot(prefs.getString("api_url_v2", "") ?: "")
         val m = mac()
         val (tokens, status) = try {
-            MuseApi.refreshDeviceToken(refresh, IdentityProtocol.deviceId(m), root, http)
+            MuseApi.refreshDeviceToken(refresh, IdentityProtocol.nodeId(m), root, http)
         } catch (e: Exception) {
             null to null
         }
