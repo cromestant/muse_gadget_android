@@ -376,6 +376,24 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Update the avatar to show recording state.
+     * Red = recording (tap to stop). Green = idle (tap to talk).
+     */
+    fun setAvatarRecording(recording: Boolean) {
+        runOnUiThread {
+            avatarButton?.let { btn ->
+                if (recording) {
+                    btn.setBackgroundColor(0xFFCC0000.toInt())
+                    btn.contentDescription = "Recording - tap to stop"
+                } else {
+                    btn.setBackgroundColor(0xFF4CAF50.toInt())
+                    btn.contentDescription = "Tap to talk"
+                }
+            }
+        }
+    }
+
+    /**
      * Update a digest UI section from a structured message.
      * Called when a chat message with type digest|ticker|artifact arrives.
      */
@@ -540,6 +558,7 @@ class MainActivity : Activity() {
                     stopTick()
                     pttButton.text = "TAP TO TALK"
                     resetPttButtonColor()
+                    setAvatarRecording(false)
                     showCapture(c, auto = true)
                     renderStatus()
                     pttResult.text = "${pttResult.text}\n(auto-stopped on silence)"
@@ -580,6 +599,7 @@ class MainActivity : Activity() {
         recordStartMs = System.currentTimeMillis()
         pttButton.text = "RECORDING 0.0s — RELEASE TO STOP (or tap for auto)"
         pttButton.setBackgroundColor(0xFFCC0000.toInt())
+        setAvatarRecording(true)
         startTick()
     }
 
@@ -600,6 +620,7 @@ class MainActivity : Activity() {
             val ok = c.stop()
             pttButton.text = "TAP TO TALK"
             resetPttButtonColor()
+            setAvatarRecording(false)
             if (ok) showCapture(c, auto = false)
             renderStatus()
         }
@@ -612,6 +633,7 @@ class MainActivity : Activity() {
             val ok = c.stop()
             pttButton.text = "TAP TO TALK"
             resetPttButtonColor()
+            setAvatarRecording(false)
             if (ok) showCapture(c, auto = false)
             renderStatus()
             return
@@ -653,6 +675,7 @@ class MainActivity : Activity() {
                     ticking = false
                     pttButton.text = "TAP TO TALK"
                     resetPttButtonColor()
+                    setAvatarRecording(false)
                     showCapture(c, auto = true)
                     renderStatus()
                     return
