@@ -16,7 +16,7 @@ import java.net.URLEncoder
 class DellTts(
     private val serverHost: String = "192.168.68.83",
     private val serverPort: Int = 8765,
-    private val voice: String = "en-US-EmmaMultilingualNeural",
+    private val voice: String = "en-US-AndrewMultilingualNeural",
     private val player: TtsPlayer
 ) {
     /**
