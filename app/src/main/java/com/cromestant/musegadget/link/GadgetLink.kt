@@ -158,16 +158,20 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         if (clean.isEmpty()) return
         ensureTtsWorker()
         // Split into sentences for smoother streaming playback.
+        // Only queue COMPLETE sentences (with terminal . ! ?). Partial trailing
+        // text is skipped here; the voice loop flushes it after the 3s quiet timeout.
         val (sentences, _) = extractSentences(clean, 0)
         val toQueue = if (sentences.isEmpty()) {
-            listOf(clean)
+            // No complete sentences found. If the text is short and has no
+            // sentence boundaries, queue as-is (likely a complete short reply).
+            // Otherwise skip (partial streaming text).
+            if (!clean.contains('.') && !clean.contains('!') && !clean.contains('?') && clean.length < 200) {
+                listOf(clean)
+            } else {
+                emptyList()
+            }
         } else {
-            val list = sentences.toMutableList()
-            // Queue any trailing text without terminal punctuation.
-            val lastEnd = clean.lastIndexOf(sentences.last()) + sentences.last().length
-            val trailing = clean.substring(lastEnd.coerceAtMost(clean.length)).trim()
-            if (trailing.isNotEmpty()) list.add(trailing)
-            list
+            sentences
         }
         // Deduplicate per-sentence: skip if queued in the last 30s
         // (voice turn loop and speakReplies can both fire for the same reply).
