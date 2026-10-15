@@ -11,7 +11,6 @@ import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.pow
-import java.util.UUID
 
 /**
  * Session orchestrator, port of the reconnect loop in
@@ -80,12 +79,16 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         const val HEALTHY_SESSION_S = 30L
         const val UNPROVISIONED_POLL_MS = 5000L
         /**
-         * Sub-chat experiment (2026-10-14): route gadget voice turns to a
-         * dedicated chat via session_id instead of the shared main chat.
-         * Set false to revert to the null-session (shared chat) behavior.
+         * Gadget voice turns go to the "Plan custom Android Muse gadget"
+         * side chat via session_id instead of the shared main chat
+         * (Charles, 2026-10-14). The backend routes session_id to a side
+         * chat; without it the turn lands in main. Set false to revert to
+         * the null-session (shared chat) behavior.
          */
-        const val USE_DEDICATED_CHAT_SESSION = false
+        const val USE_DEDICATED_CHAT_SESSION = true
         private const val CHAT_SESSION_ID_KEY = "gadget_chat_session_id"
+        /** "Plan custom Android Muse gadget" side chat UUID. */
+        const val GADGET_SIDE_CHAT_ID = "c9c273dc-22a7-4572-a98a-0d6e66f44375"
     }
 
     private val appContext = context.applicationContext
@@ -139,16 +142,13 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     }
 
     /**
-     * Stable per-device gadget chat session id, generated once and persisted.
-     * Used as session_id on chat/stream + chat/subscribe when
-     * USE_DEDICATED_CHAT_SESSION is true.
+     * Pinned side-chat id for gadget voice turns (the "Plan custom Android
+     * Muse gadget" chat). Stored to prefs and used as session_id on
+     * chat/stream + chat/subscribe when USE_DEDICATED_CHAT_SESSION is true.
      */
     fun gadgetChatSessionId(): String {
-        val existing = prefs.getString(CHAT_SESSION_ID_KEY, "")
-        if (!existing.isNullOrEmpty()) return existing
-        val fresh = UUID.randomUUID().toString()
-        prefs.edit().putString(CHAT_SESSION_ID_KEY, fresh).apply()
-        return fresh
+        prefs.edit().putString(CHAT_SESSION_ID_KEY, GADGET_SIDE_CHAT_ID).apply()
+        return GADGET_SIDE_CHAT_ID
     }
 
     /** Idempotent; launches the loop thread. */
@@ -394,7 +394,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         if (ev == null) {
                             // Quiet timeout: if we have text and nothing new for 6s, speak it.
                             if (spokenText.trim().isNotEmpty() &&
-                                System.currentTimeMillis() - lastTextMs > 6_000) break
+                                System.currentTimeMillis() - lastTextMs > 3_000) break
                             continue
                         }
                         System.out.println("MuseGadgetVoice: " + describeChatEvent(ev))

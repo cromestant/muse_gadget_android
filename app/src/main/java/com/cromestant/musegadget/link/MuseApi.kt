@@ -142,12 +142,11 @@ object MuseApi {
     ): Pair<DeviceTokens?, Int?> {
         val body = Json.stringify(mapOf("device_id" to deviceId))
             .toRequestBody("application/json".toMediaType())
-        val headers = listOf(
-            refreshAuthHeader(deviceId, refreshToken),
-            refreshAuthHeaderRaw(refreshToken)
-        )
+        // SDK tries once with Bearer <redacted>:<raw> (prefix stripped).
+        // A 401 means the pairing is revoked, not a format issue.
+        val authHeader = refreshAuthHeader(deviceId, refreshToken)
         var lastStatus: Int? = null
-        for ((i, authHeader) in headers.withIndex()) {
+        run {
             val req = Request.Builder()
                 .url(root + REFRESH_PATH)
                 .header("Authorization", authHeader)
@@ -157,7 +156,7 @@ object MuseApi {
             try {
                 http.newCall(req).execute().use { resp ->
                     val status = resp.code
-                    val formatName = if (i == 0) "device-bound" else "raw-token"
+                    val formatName = "device-bound"
                     // Log response body on failure (never log the token itself).
                     var errBody = ""
                     if (!resp.isSuccessful) {
@@ -165,8 +164,7 @@ object MuseApi {
                             errBody = resp.body?.string()?.take(500) ?: ""
                         } catch (_: Exception) {}
                     }
-                    System.out.println("MuseGadgetAuth: refresh attempt " + (i + 1) +
-                        " [" + formatName + "] -> HTTP " + status +
+                    System.out.println("MuseGadgetAuth: refresh [" + formatName + "] -> HTTP " + status +
                         (if (errBody.isNotEmpty()) " body=" + errBody else "") +
                         " refreshLen=" + refreshToken.length)
                     if (status == 401 || !resp.isSuccessful) {
@@ -175,14 +173,13 @@ object MuseApi {
                     }
                     val parsed = parseRefreshResponse(resp)
                     if (parsed != null) {
-                        System.out.println("MuseGadgetAuth: refresh succeeded on attempt " + (i + 1))
+                        System.out.println("MuseGadgetAuth: refresh succeeded")
                         return parsed to status
                     }
                     lastStatus = status
                 }
             } catch (e: Exception) {
-                System.out.println("MuseGadgetAuth: refresh attempt " + (i + 1) +
-                    " threw " + e.javaClass.simpleName)
+                System.out.println("MuseGadgetAuth: refresh threw " + e.javaClass.simpleName)
             }
         }
         return null to lastStatus
