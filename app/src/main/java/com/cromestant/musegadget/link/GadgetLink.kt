@@ -119,6 +119,9 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
 
     /** Streaming TTS: sentences are queued and spoken sequentially by a worker thread. */
     private val ttsQueue = LinkedBlockingQueue<String>()
+    /** Recently spoken sentences (with timestamps) to deduplicate voice loop + speakReplies. */
+    private val recentSpoken = mutableMapOf<String, Long>()
+    private val recentSpokenLock = Object()
     @Volatile private var ttsWorker: Thread? = null
     private val ttsWorkerLock = Object()
 
@@ -156,18 +159,32 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         ensureTtsWorker()
         // Split into sentences for smoother streaming playback.
         val (sentences, _) = extractSentences(clean, 0)
-        if (sentences.isEmpty()) {
-            // No sentence boundaries found, queue as-is.
-            ttsQueue.offer(clean)
+        val toQueue = if (sentences.isEmpty()) {
+            listOf(clean)
         } else {
-            for (sentence in sentences) {
-                ttsQueue.offer(sentence)
-            }
+            val list = sentences.toMutableList()
             // Queue any trailing text without terminal punctuation.
             val lastEnd = clean.lastIndexOf(sentences.last()) + sentences.last().length
             val trailing = clean.substring(lastEnd.coerceAtMost(clean.length)).trim()
-            if (trailing.isNotEmpty()) {
-                ttsQueue.offer(trailing)
+            if (trailing.isNotEmpty()) list.add(trailing)
+            list
+        }
+        // Deduplicate per-sentence: skip if queued in the last 30s
+        // (voice turn loop and speakReplies can both fire for the same reply).
+        val now = System.currentTimeMillis()
+        synchronized(recentSpokenLock) {
+            // Clean old entries
+            val it = recentSpoken.entries.iterator()
+            while (it.hasNext()) {
+                if (now - it.next().value > 30_000) it.remove()
+            }
+            for (sentence in toQueue) {
+                if (recentSpoken.containsKey(sentence)) {
+                    System.out.println("MuseGadgetTts: skipping duplicate sentence")
+                    continue
+                }
+                recentSpoken[sentence] = now
+                ttsQueue.offer(sentence)
             }
         }
     }
