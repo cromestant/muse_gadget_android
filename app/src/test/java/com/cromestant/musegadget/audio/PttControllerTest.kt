@@ -15,6 +15,7 @@ private class FakeClock(var t: Long = 0) : PttClock {
 private class FakeSource(var bytes: ByteArray = ByteArray(3200)) : PcmSource {
     var started = false
     var available = true
+    var fakeMaxAmplitude = 0.5
     override fun start(): Boolean {
         if (!available) return false
         started = true
@@ -24,6 +25,8 @@ private class FakeSource(var bytes: ByteArray = ByteArray(3200)) : PcmSource {
         started = false
         return bytes
     }
+    override fun getMaxAmplitude(): Double = fakeMaxAmplitude
+    override fun getAmplitude(): Double = 0.5
 }
 
 class PttControllerTest {

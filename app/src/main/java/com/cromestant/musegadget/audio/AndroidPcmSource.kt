@@ -20,9 +20,15 @@ class AndroidPcmSource(
     private val running = AtomicBoolean(false)
     private val buf = ByteArrayOutputStream()
     private val bufLock = Any()
+    /** Recent RMS amplitude (0.0-1.0) for voice activity detection. */
+    @Volatile private var currentAmplitude = 0.0
+    /** Max amplitude seen during current recording (for mistake detection). */
+    @Volatile private var maxAmplitude = 0.0
 
     override fun start(): Boolean {
         synchronized(bufLock) { buf.reset() }
+        maxAmplitude = 0.0
+        currentAmplitude = 0.0
         val minBuf = try {
             AudioRecord.getMinBufferSize(
                 sampleRate,
@@ -68,10 +74,29 @@ class AndroidPcmSource(
                 }
                 if (n <= 0) continue
                 synchronized(bufLock) { buf.write(chunk, 0, n) }
+                // Compute RMS amplitude for VAD (16-bit PCM).
+                var sum = 0.0
+                val samples = n / 2
+                if (samples > 0) {
+                    for (i in 0 until samples) {
+                        val lo = chunk[i * 2].toInt() and 0xFF
+                        val hi = chunk[i * 2 + 1].toInt()
+                        val sample = (hi shl 8) or lo
+                        val normalized = sample / 32768.0
+                        sum += normalized * normalized
+                    }
+                    currentAmplitude = kotlin.math.sqrt(sum / samples)
+                    if (currentAmplitude > maxAmplitude) maxAmplitude = currentAmplitude
+                }
             }
         }, "pcm-capture").also { it.isDaemon = true; it.start() }
         return true
     }
+
+    /** Current RMS amplitude (0.0-1.0). Used for voice activity detection. */
+    override fun getAmplitude(): Double = currentAmplitude
+    /** Max amplitude during current recording. Used for mistake detection. */
+    override fun getMaxAmplitude(): Double = maxAmplitude
 
     override fun stopAndDrain(): ByteArray {
         running.set(false)

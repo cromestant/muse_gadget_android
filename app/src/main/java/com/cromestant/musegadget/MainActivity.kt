@@ -116,7 +116,20 @@ class MainActivity : Activity() {
 
         tokenSave.setOnClickListener { saveToken() }
         tokenClear.setOnClickListener { store.clear(); renderToken() }
-        pttButton.setOnClickListener { onPttTap() }
+        // Tap = start with VAD auto-stop; Hold = record while held, stop on release.
+        pttButton.setOnTouchListener { _, event ->
+            when (event.action) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    onPttPress()
+                    true
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    onPttRelease()
+                    true
+                }
+                else -> false
+            }
+        }
         refreshBtn.setOnClickListener { renderStatus() }
 
         for (v in listOf(gateView, permView, tokenHelp, tokenInput, tokenSave, tokenMsg, tokenSaved, tokenClear, statusView, pttButton, pttResult, refreshBtn)) {
@@ -260,9 +273,74 @@ class MainActivity : Activity() {
                 onAutoStop = { ui.post { pttResult.text = "${pttResult.text}\n(auto-stopped at 15s)" } },
                 onTooShort = { ui.post { pttResult.text = "Didn't catch that (hold at least 0.3s)" } },
             )
+            c.setOnVadAutoStop {
+                ui.post {
+                    stopTick()
+                    pttButton.text = "TAP TO TALK"
+                    resetPttButtonColor()
+                    showCapture(c, auto = true)
+                    renderStatus()
+                    pttResult.text = "${pttResult.text}\n(auto-stopped on silence)"
+                }
+            }
             ptt = c
         }
         return c
+    }
+
+    /** Timestamp of ACTION_DOWN, for tap vs hold detection. */
+    private var pttDownMs = 0L
+    /** True if the current recording was started by a hold (not a tap). */
+    private var pttHoldStarted = false
+
+    private fun onPttPress() {
+        val c = pttController()
+        // If already recording (tap mode with VAD), ignore press.
+        if (c.currentState() == PttController.State.RECORDING) return
+        pttDownMs = System.currentTimeMillis()
+        pttHoldStarted = false
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pttResult.text = "Microphone permission denied — PTT unavailable."
+            return
+        }
+        // Hold mode: VAD auto-stop disabled while held.
+        c.holdMode = true
+        if (!c.start()) {
+            pttResult.text = "Mic unavailable."
+            c.holdMode = false
+            return
+        }
+        // Barge-in: stop any spoken reply before recording the next turn.
+        try {
+            GadgetService.instance?.gadgetLink?.stopTtsPlayback()
+        } catch (_: Exception) {
+        }
+        recordStartMs = System.currentTimeMillis()
+        pttButton.text = "RECORDING 0.0s — RELEASE TO STOP (or tap for auto)"
+        pttButton.setBackgroundColor(0xFFCC0000.toInt())
+        startTick()
+    }
+
+    private fun onPttRelease() {
+        val c = pttController()
+        if (c.currentState() != PttController.State.RECORDING) return
+        val heldMs = System.currentTimeMillis() - pttDownMs
+        if (heldMs < 300 && !pttHoldStarted) {
+            // Quick tap: switch to VAD mode (auto-stop on silence).
+            // Don't stop now; the VAD monitor will stop on 1.5s silence.
+            c.holdMode = false
+            pttButton.text = "RECORDING 0.0s — AUTO-STOP ON SILENCE"
+            System.out.println("MuseGadgetVoice: tap detected, VAD auto-stop enabled")
+        } else {
+            // Hold release: stop immediately.
+            stopTick()
+            c.holdMode = false
+            val ok = c.stop()
+            pttButton.text = "TAP TO TALK"
+            resetPttButtonColor()
+            if (ok) showCapture(c, auto = false)
+            renderStatus()
+        }
     }
 
     private fun onPttTap() {
