@@ -425,6 +425,23 @@ class MainActivity : Activity() {
         // Service binds async; poll briefly for status.
         ui.postDelayed({ renderStatus() }, 800)
         renderPermSummary()
+        // Start background chat listener for digest updates.
+        ui.postDelayed({
+            try {
+                val link = GadgetService.instance?.gadgetLink
+                link?.setOnBackgroundMessage { type, content ->
+                    updateDigestSection(type, content)
+                }
+                link?.startBackgroundChatListener()
+            } catch (_: Exception) { }
+        }, 2000)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try {
+            GadgetService.instance?.gadgetLink?.stopBackgroundChatListener()
+        } catch (_: Exception) { }
     }
 
     // ---- permissions (API 29) ----

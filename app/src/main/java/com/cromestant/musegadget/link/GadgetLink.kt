@@ -237,6 +237,8 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         }
     }
     @Volatile private var ttsThread: Thread? = null
+    @Volatile private var bgChatThread: Thread? = null
+    @Volatile private var onBackgroundMessage: ((String, String) -> Unit)? = null
     @Volatile private var lastRotateAttemptMs: Long = Long.MIN_VALUE / 2
     @Volatile private var forceRefresh: Boolean = false
 
@@ -456,6 +458,84 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             onUnpaired?.invoke()
         } catch (e: Exception) {
         }
+    }
+
+    /** Set callback for background digest messages (type, content). */
+    fun setOnBackgroundMessage(cb: ((String, String) -> Unit)?) {
+        onBackgroundMessage = cb
+    }
+
+    /**
+     * Start background chat subscription for digest updates.
+     * Runs in a daemon thread, reconnects on failure.
+     */
+    fun startBackgroundChatListener() {
+        synchronized(this) {
+            if (bgChatThread?.isAlive == true) return
+            val t = Thread({
+                while (!Thread.currentThread().isInterrupted) {
+                    try {
+                        val cur = current
+                        if (cur == null) {
+                            Thread.sleep(5000); continue
+                        }
+                        val session = cur
+                        val chatSessionId = if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
+                        System.out.println("MuseGadgetBg: subscribing for digest updates")
+                        val sub = session.subscribeChat(chatSessionId)
+                        try {
+                            while (!Thread.currentThread().isInterrupted) {
+                                val ev = try { sub.nextEvent(30000) }
+                                catch (e: Exception) {
+                                    System.out.println("MuseGadgetBg: event error: " + e.javaClass.simpleName)
+                                    break
+                                }
+                                if (ev == null) continue
+                                val text = extractTextFromEvent(ev)
+                                if (text != null) tryParseStructured(text)
+                            }
+                        } finally {
+                            try { sub.close() } catch (_: Exception) { }
+                        }
+                    } catch (e: InterruptedException) {
+                        break
+                    } catch (e: Exception) {
+                        System.out.println("MuseGadgetBg: error: " + e.javaClass.simpleName)
+                        try { Thread.sleep(5000) } catch (_: InterruptedException) { break }
+                    }
+                }
+            }, "muse-bg-chat")
+            t.isDaemon = true
+            t.start()
+            bgChatThread = t
+        }
+    }
+
+    fun stopBackgroundChatListener() {
+        try { bgChatThread?.interrupt() } catch (_: Exception) { }
+        bgChatThread = null
+    }
+
+    private fun extractTextFromEvent(ev: Map<String, Any?>): String? {
+        val event = ev["event"] as? String ?: return null
+        if (event != "delta.text_append" && event != "message.assistant") return null
+        val payload = ev["payload"] as? Map<*, *> ?: return null
+        return payload["text"] as? String
+    }
+
+    private fun tryParseStructured(text: String): Boolean {
+        val trimmed = text.trim()
+        if (!trimmed.startsWith("{")) return false
+        return try {
+            val json = org.json.JSONObject(trimmed)
+            val type = json.optString("type", "")
+            val content = json.optString("content", "")
+            if (type in listOf("digest", "ticker", "artifact", "tasks") && content.isNotEmpty()) {
+                onBackgroundMessage?.invoke(type, content)
+                System.out.println("MuseGadgetBg: routed " + type)
+                true
+            } else false
+        } catch (_: Exception) { false }
     }
 
     /**
