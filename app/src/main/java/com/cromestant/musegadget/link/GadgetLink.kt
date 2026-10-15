@@ -484,6 +484,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         System.out.println("MuseGadgetBg: subscribing for digest updates")
                         val sub = session.subscribeChat(chatSessionId)
                         try {
+                            val buffers = mutableMapOf<String, StringBuilder>()
                             while (!Thread.currentThread().isInterrupted) {
                                 val ev = try { sub.nextEvent(30000) }
                                 catch (e: Exception) {
@@ -491,8 +492,22 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                                     break
                                 }
                                 if (ev == null) continue
-                                val text = extractTextFromEvent(ev)
-                                if (text != null) tryParseStructured(text)
+                                System.out.println("MuseGadgetBg: " + describeChatEvent(ev))
+                                val update = extractBgText(ev) ?: continue
+                                val (msgId, text, done) = update
+                                val buf = buffers.getOrPut(msgId) { StringBuilder() }
+                                // Done events carry the full text; deltas are fragments.
+                                if (done) {
+                                    buf.clear()
+                                    buf.append(text)
+                                } else {
+                                    buf.append(text)
+                                }
+                                if (tryParseStructured(buf.toString())) {
+                                    if (done) buffers.remove(msgId)
+                                } else if (done) {
+                                    buffers.remove(msgId)
+                                }
                             }
                         } finally {
                             try { sub.close() } catch (_: Exception) { }
@@ -516,11 +531,63 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         bgChatThread = null
     }
 
-    private fun extractTextFromEvent(ev: Map<String, Any?>): String? {
-        val event = ev["event"] as? String ?: return null
-        if (event != "delta.text_append" && event != "message.assistant") return null
-        val payload = ev["payload"] as? Map<*, *> ?: return null
-        return payload["text"] as? String
+    /**
+     * One text update from a background chat event. Returns
+     * (messageId, text, done). Mirrors the payload shapes handled by
+     * `MuseTurnTracker.message`: `delta.text_append` carries a streaming
+     * fragment in `payload.text`, while `delta.message_done` /
+     * `message.assistant` carry the full text in `display_text`,
+     * `transcript`, or `content` — never `text`. `delta.presentation`
+     * carries `fallback_text`. Returns null for non-message events.
+     */
+    internal fun extractBgText(ev: Map<String, Any?>): Triple<String, String, Boolean>? {
+        if (ev["type"] != "event") return null
+        val name = ev["event"] as? String ?: return null
+        @Suppress("UNCHECKED_CAST")
+        val payload = ev["payload"] as? Map<String, Any?> ?: return null
+        val msgId = (payload["message_id"] as? String)?.takeIf { it.isNotEmpty() }
+            ?: (ev["message_id"] as? String)?.takeIf { it.isNotEmpty() }
+            ?: (payload["id"] as? String)?.takeIf { it.isNotEmpty() }
+            ?: return null
+        if (payload["role"] == "user") return null
+        return when (name) {
+            "delta.text_append" -> {
+                val text = payload["text"] as? String ?: return null
+                Triple(msgId, text, false)
+            }
+            "delta.message_done", "message.assistant" -> {
+                var full = payload["display_text"] as? String
+                if (full == null) {
+                    val transcript = payload["transcript"]
+                    full = if (transcript is String) transcript
+                    else transcriptText(transcript, msgId)
+                    if (full.isEmpty() && transcript !is String) {
+                        full = payload["content"] as? String ?: ""
+                    }
+                }
+                if (full.isEmpty()) return null
+                Triple(msgId, full, true)
+            }
+            "delta.presentation" -> {
+                val data = payload["data"] as? Map<*, *>
+                var fallback: String? = data?.get("fallback_text") as? String
+                if (fallback == null) {
+                    for (key in listOf("audio", "videos", "images")) {
+                        val section = data?.get(key)
+                        val candidates = if (section is List<*>) section else listOf(section)
+                        for (c in candidates) {
+                            val ft = (c as? Map<*, *>)?.get("fallback_text") as? String
+                            if (!ft.isNullOrEmpty()) { fallback = ft; break }
+                        }
+                        if (!fallback.isNullOrEmpty()) break
+                    }
+                }
+                if (fallback == null) fallback = payload["fallback_text"] as? String
+                if (fallback.isNullOrEmpty()) return null
+                Triple(msgId, fallback, true)
+            }
+            else -> null
+        }
     }
 
     private fun tryParseStructured(text: String): Boolean {
