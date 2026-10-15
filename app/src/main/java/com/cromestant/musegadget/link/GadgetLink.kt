@@ -149,12 +149,27 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         }
     }
 
-    /** Enqueue [text] for streaming TTS playback. Non-blocking. */
+    /** Enqueue [text] for streaming TTS playback. Splits into sentences, non-blocking. */
     private fun speakStreaming(text: String) {
         val clean = text.trim()
         if (clean.isEmpty()) return
         ensureTtsWorker()
-        ttsQueue.offer(clean)
+        // Split into sentences for smoother streaming playback.
+        val (sentences, _) = extractSentences(clean, 0)
+        if (sentences.isEmpty()) {
+            // No sentence boundaries found, queue as-is.
+            ttsQueue.offer(clean)
+        } else {
+            for (sentence in sentences) {
+                ttsQueue.offer(sentence)
+            }
+            // Queue any trailing text without terminal punctuation.
+            val lastEnd = clean.lastIndexOf(sentences.last()) + sentences.last().length
+            val trailing = clean.substring(lastEnd.coerceAtMost(clean.length)).trim()
+            if (trailing.isNotEmpty()) {
+                ttsQueue.offer(trailing)
+            }
+        }
     }
 
     /**
@@ -539,6 +554,8 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      */
     fun speakReplies(messageIds: List<String>, fallbackText: String = "") {
         stopTtsPlayback()
+        // Clear any stale queued sentences from a previous reply.
+        try { ttsQueue.clear() } catch (_: Exception) { }
         if (messageIds.isEmpty() && fallbackText.trim().isEmpty()) return
         val session = current
         // Device TTS works without a server session; server TTS needs one.
