@@ -157,8 +157,18 @@ object MuseApi {
             try {
                 http.newCall(req).execute().use { resp ->
                     val status = resp.code
+                    val formatName = if (i == 0) "device-bound" else "raw-token"
+                    // Log response body on failure (never log the token itself).
+                    var errBody = ""
+                    if (!resp.isSuccessful) {
+                        try {
+                            errBody = resp.body?.string()?.take(500) ?: ""
+                        } catch (_: Exception) {}
+                    }
                     System.out.println("MuseGadgetAuth: refresh attempt " + (i + 1) +
-                        " -> HTTP " + status)
+                        " [" + formatName + "] -> HTTP " + status +
+                        (if (errBody.isNotEmpty()) " body=" + errBody else "") +
+                        " refreshLen=" + refreshToken.length)
                     if (status == 401 || !resp.isSuccessful) {
                         lastStatus = status
                         return@use
