@@ -8,6 +8,7 @@ import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.identity.TokenStore
 import okhttp3.OkHttpClient
 import java.security.SecureRandom
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.pow
@@ -115,6 +116,77 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     private val ttsPlayer: TtsPlayer by lazy { TtsPlayer(appContext) }
     private val deviceTts: DeviceTts by lazy { DeviceTts(appContext) }
     private val dellTts: DellTts by lazy { DellTts(player = ttsPlayer) }
+
+    /** Streaming TTS: sentences are queued and spoken sequentially by a worker thread. */
+    private val ttsQueue = LinkedBlockingQueue<String>()
+    @Volatile private var ttsWorker: Thread? = null
+    private val ttsWorkerLock = Object()
+
+    /**
+     * Start the TTS worker thread if not running. Speaks queued sentences
+     * sequentially via Dell (Edge-TTS) with DeviceTts fallback.
+     */
+    private fun ensureTtsWorker() {
+        synchronized(ttsWorkerLock) {
+            val w = ttsWorker
+            if (w != null && w.isAlive) return
+            val t = Thread({
+                try {
+                    while (!Thread.currentThread().isInterrupted) {
+                        val sentence = ttsQueue.take()
+                        if (sentence.isEmpty()) continue
+                        val viaDell = try { dellTts.speak(sentence) } catch (_: Exception) { false }
+                        if (!viaDell) {
+                            try { deviceTts.speak(sentence) } catch (_: Exception) { }
+                        }
+                    }
+                } catch (_: InterruptedException) {
+                }
+            }, "MuseGadgetTtsWorker")
+            t.isDaemon = true
+            t.start()
+            ttsWorker = t
+        }
+    }
+
+    /** Enqueue [text] for streaming TTS playback. Non-blocking. */
+    private fun speakStreaming(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        ensureTtsWorker()
+        ttsQueue.offer(clean)
+    }
+
+    /**
+     * Extract complete sentences from [text] starting at [fromIndex].
+     * Returns (sentences, newIndex) where newIndex is the position after
+     * the last complete sentence. A sentence ends with . ! ? followed by
+     * whitespace or end of text.
+     */
+    private fun extractSentences(text: String, fromIndex: Int): Pair<List<String>, Int> {
+        val sentences = mutableListOf<String>()
+        var idx = fromIndex
+        var start = fromIndex
+        while (idx < text.length) {
+            val c = text[idx]
+            if (c == '.' || c == '!' || c == '?') {
+                // Check if followed by whitespace or end (sentence boundary)
+                val next = if (idx + 1 < text.length) text[idx + 1] else ' '
+                if (next.isWhitespace() || idx + 1 >= text.length) {
+                    val sentence = text.substring(start, idx + 1).trim()
+                    if (sentence.isNotEmpty()) sentences.add(sentence)
+                    // Skip whitespace after the sentence
+                    var j = idx + 1
+                    while (j < text.length && text[j].isWhitespace()) j++
+                    start = j
+                    idx = j
+                    continue
+                }
+            }
+            idx++
+        }
+        return sentences to start
+    }
 
     /**
      * Speak [text] via Edge-TTS (Dell server) first, falling back to the
@@ -385,6 +457,8 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     val deadline = System.currentTimeMillis() + 25_000
                     var spokenText = ""
                     var lastTextMs = 0L
+                    // Streaming TTS: track how much text has been sent to TTS.
+                    var streamedUpTo = 0
                     while (System.currentTimeMillis() < deadline) {
                         val ev = try {
                             sub.nextEvent(5_000)
@@ -401,13 +475,18 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         for (te in tracker.feed(ev)) when (te) {
                             is TurnEvent.Reply -> {
                                 listener.onPartial(te.text)
-                                if (te.text.trim().isNotEmpty()) {
-                                    spokenText = te.text
+                                val txt = te.text
+                                if (txt.trim().isNotEmpty()) {
+                                    spokenText = txt
                                     lastTextMs = System.currentTimeMillis()
-                                }
-                                if (te.done && te.text.trim().isNotEmpty()) {
-                                    speakText(te.text)
-                                    spokenText = ""
+                                    // Extract and speak complete sentences immediately.
+                                    if (txt.length > streamedUpTo) {
+                                        val (sentences, newIdx) = extractSentences(txt, streamedUpTo)
+                                        for (sentence in sentences) {
+                                            speakStreaming(sentence)
+                                        }
+                                        streamedUpTo = newIdx
+                                    }
                                 }
                             }
                             is TurnEvent.AgentStatus -> {}
@@ -415,8 +494,11 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         }
                         if (tracker.complete()) break
                     }
-                    val toSpeak = spokenText.trim()
-                    speakText(toSpeak)
+                    // Flush any remaining text after the turn completes.
+                    val remaining = spokenText.substring(streamedUpTo.coerceAtMost(spokenText.length)).trim()
+                    if (remaining.isNotEmpty()) {
+                        speakStreaming(remaining)
+                    }
                 } finally {
                     try {
                         sub.close()
@@ -463,7 +545,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         if (session == null) {
             if (fallbackText.trim().isNotEmpty()) {
                 ttsThread = thread(isDaemon = true, name = "tts-speak") {
-                    speakText(fallbackText)
+                    speakStreaming(fallbackText)
                 }
             }
             return
@@ -489,7 +571,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 // Fallback: device TTS speaks the reply text directly.
                 if (fallbackText.trim().isNotEmpty()) {
                     try {
-                        speakText(fallbackText)
+                        speakStreaming(fallbackText)
                     } catch (e: Exception) {
                         System.out.println("MuseGadgetTts: device TTS failed: " + e.javaClass.simpleName)
                     }
