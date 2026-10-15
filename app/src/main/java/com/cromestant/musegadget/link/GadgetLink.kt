@@ -574,9 +574,24 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      * dead session skip silently (the text reply already showed).
      */
     fun speakReplies(messageIds: List<String>, fallbackText: String = "") {
-        stopTtsPlayback()
-        // Clear any stale queued sentences from a previous reply.
-        try { ttsQueue.clear() } catch (_: Exception) { }
+        // Don't interrupt if the voice turn loop already queued this text.
+        // Check if the first sentence is in recentSpoken (deduplication map).
+        val clean = fallbackText.trim()
+        var alreadyQueued = false
+        if (clean.isNotEmpty()) {
+            val (sentences, _) = extractSentences(clean, 0)
+            val firstSentence = if (sentences.isNotEmpty()) sentences[0] else clean
+            synchronized(recentSpokenLock) {
+                alreadyQueued = recentSpoken.containsKey(firstSentence)
+            }
+        }
+        if (!alreadyQueued) {
+            stopTtsPlayback()
+            // Clear any stale queued sentences from a previous reply.
+            try { ttsQueue.clear() } catch (_: Exception) { }
+        } else {
+            System.out.println("MuseGadgetTts: speakReplies skipping, voice loop already handling")
+        }
         if (messageIds.isEmpty() && fallbackText.trim().isEmpty()) return
         val session = current
         // Device TTS works without a server session; server TTS needs one.
