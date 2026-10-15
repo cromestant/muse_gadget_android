@@ -58,8 +58,10 @@ object MuseApi {
      * The format is isolated in this one function so the live test can flip it.
      */
     fun refreshAuthHeader(deviceId: String, refreshToken: String): String {
+        // SDK: Bearer hatch_refresh:<raw> where raw = token without prefix.
+        // The "hatch_refresh:" prefix is literal, NOT the device ID.
         val raw = refreshToken.substringAfterLast(":")
-        return "Bearer $deviceId:$raw"
+        return "Bearer hatch_refresh:$raw"
     }
 
     /** Alternate format: raw token alone. Tried when the device-bound format gets 401. */
