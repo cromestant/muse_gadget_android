@@ -3,6 +3,7 @@ package com.cromestant.musegadget.link
 import android.content.Context
 import com.cromestant.musegadget.audio.DeviceTts
 import com.cromestant.musegadget.audio.TtsPlayer
+import com.cromestant.musegadget.audio.DellTts
 import com.cromestant.musegadget.identity.IdentityProtocol
 import com.cromestant.musegadget.identity.TokenStore
 import okhttp3.OkHttpClient
@@ -110,6 +111,20 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      */
     private val ttsPlayer: TtsPlayer by lazy { TtsPlayer(appContext) }
     private val deviceTts: DeviceTts by lazy { DeviceTts(appContext) }
+    private val dellTts: DellTts by lazy { DellTts(player = ttsPlayer) }
+
+    /**
+     * Speak [text] via Edge-TTS (Dell server) first, falling back to the
+     * on-device system TTS if the Dell is unreachable.
+     */
+    private fun speakText(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        val viaDell = try { dellTts.speak(clean) } catch (_: Exception) { false }
+        if (!viaDell) {
+            try { deviceTts.speak(clean) } catch (_: Exception) { }
+        }
+    }
     @Volatile private var ttsThread: Thread? = null
     @Volatile private var lastRotateAttemptMs: Long = Long.MIN_VALUE / 2
     @Volatile private var forceRefresh: Boolean = false
@@ -381,7 +396,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                                 listener.onPartial(te.text)
                                 spokenText = te.text
                                 if (te.done && te.text.trim().isNotEmpty()) {
-                                    deviceTts?.speak(te.text.trim())
+                                    speakText(te.text)
                                     spokenText = ""
                                 }
                             }
@@ -391,7 +406,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         if (tracker.complete()) break
                     }
                     val toSpeak = spokenText.trim()
-                    if (toSpeak.isNotEmpty()) deviceTts?.speak(toSpeak)
+                    speakText(toSpeak)
                 } finally {
                     try {
                         sub.close()
@@ -438,7 +453,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         if (session == null) {
             if (fallbackText.trim().isNotEmpty()) {
                 ttsThread = thread(isDaemon = true, name = "tts-speak") {
-                    try { deviceTts.speak(fallbackText) } catch (_: Exception) { }
+                    speakText(fallbackText)
                 }
             }
             return
@@ -464,7 +479,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 // Fallback: device TTS speaks the reply text directly.
                 if (fallbackText.trim().isNotEmpty()) {
                     try {
-                        deviceTts.speak(fallbackText)
+                        speakText(fallbackText)
                     } catch (e: Exception) {
                         System.out.println("MuseGadgetTts: device TTS failed: " + e.javaClass.simpleName)
                     }
