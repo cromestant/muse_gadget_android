@@ -197,20 +197,27 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         }
     }
 
-    /** Enqueue [text] for streaming TTS playback. Splits into sentences, non-blocking. */
-    private fun speakStreaming(text: String) {
+    /**
+     * Enqueue [text] for streaming TTS playback. Splits into sentences, non-blocking.
+     * Mid-turn streaming ([isFinal] = false) queues only COMPLETE sentences
+     * (with terminal . ! ?): queuing a short partial fragment as-is is what
+     * spoke a lone first word ("Got") while the rest of the reply was still
+     * arriving. The end-of-turn flush and fallbacks pass [isFinal] = true so
+     * a short complete reply (or the final fragment) still speaks.
+     */
+    private fun speakStreaming(text: String, isFinal: Boolean = false) {
         val clean = text.trim()
         if (clean.isEmpty()) return
         ensureTtsWorker()
         // Split into sentences for smoother streaming playback.
         // Only queue COMPLETE sentences (with terminal . ! ?). Partial trailing
-        // text is skipped here; the voice loop flushes it after the 3s quiet timeout.
+        // text is skipped here; the voice loop flushes it after the turn ends.
         val (sentences, _) = extractSentences(clean, 0)
         val toQueue = if (sentences.isEmpty()) {
-            // No complete sentences found. If the text is short and has no
-            // sentence boundaries, queue as-is (likely a complete short reply).
-            // Otherwise skip (partial streaming text).
-            if (!clean.contains('.') && !clean.contains('!') && !clean.contains('?') && clean.length < 200) {
+            // No complete sentences found. If this is the final text and it is
+            // short with no sentence boundaries, queue as-is (likely a
+            // complete short reply). Otherwise skip (partial streaming text).
+            if (isFinal && !clean.contains('.') && !clean.contains('!') && !clean.contains('?') && clean.length < 200) {
                 listOf(clean)
             } else {
                 emptyList()
@@ -628,7 +635,11 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         val (msgId, text, done) = update
                         val buf = buffers.getOrPut(msgId) { StringBuilder() }
                         // Done events carry the full text; deltas are fragments.
-                        if (done) {
+                        // An empty done marker flushes the streamed fragments.
+                        if (done && text.isEmpty()) {
+                            // Leave the buffered deltas in place for the
+                            // flush below; nothing new to append.
+                        } else if (done) {
                             buf.clear()
                             buf.append(text)
                         } else {
@@ -702,7 +713,9 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         full = payload["content"] as? String ?: ""
                     }
                 }
-                if (full.isEmpty()) return null
+                // An empty done marker carries no text (cf. muse_chat_link.c):
+                // flush the streamed deltas buffered so far instead of
+                // dropping the event and stalling the buffer forever.
                 Triple(msgId, full, true)
             }
             "delta.presentation" -> {
@@ -842,7 +855,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     // Flush any remaining text after the turn completes.
                     val remaining = spokenText.substring(streamedUpTo.coerceAtMost(spokenText.length)).trim()
                     if (remaining.isNotEmpty()) {
-                        speakStreaming(remaining)
+                        speakStreaming(remaining, isFinal = true)
                     }
                     val finalText = tracker.finalText()
                     System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length +
@@ -870,8 +883,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         } catch (e: Exception) {
         }
         // Drop queued (not yet spoken) sentences so barge-in actually
-        // silences streaming speech instead of just the current sentence.
+        // silences streaming speech instead of just the current sentence,
+        // and forget their dedup marks so the next turn can queue them again.
         try { ttsQueue.clear() } catch (_: Exception) { }
+        synchronized(recentSpokenLock) { recentSpoken.clear() }
         try {
             ttsPlayer.stop()
         } catch (e: Exception) {
@@ -885,31 +900,19 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      * dead session skip silently (the text reply already showed).
      */
     fun speakReplies(messageIds: List<String>, fallbackText: String = "") {
-        // Don't interrupt if the voice turn loop already queued this text.
-        // Check if the first sentence is in recentSpoken (deduplication map).
-        val clean = fallbackText.trim()
-        var alreadyQueued = false
-        if (clean.isNotEmpty()) {
-            val (sentences, _) = extractSentences(clean, 0)
-            val firstSentence = if (sentences.isNotEmpty()) sentences[0] else clean
-            synchronized(recentSpokenLock) {
-                alreadyQueued = recentSpoken.containsKey(firstSentence)
-            }
-        }
-        if (!alreadyQueued) {
-            stopTtsPlayback()
-            // Clear any stale queued sentences from a previous reply.
-            try { ttsQueue.clear() } catch (_: Exception) { }
-        } else {
-            System.out.println("MuseGadgetTts: speakReplies skipping, voice loop already handling")
-        }
+        // End-of-turn playback is authoritative: full server audio (or the
+        // full fallback text) replaces the streaming fragments the voice
+        // loop queued. Always stop those first — leaving them queued lets
+        // the worker talk over (or after) the server audio on the same
+        // player, which chops both into fragments.
+        stopTtsPlayback()
         if (messageIds.isEmpty() && fallbackText.trim().isEmpty()) return
         val session = current
         // Device TTS works without a server session; server TTS needs one.
         if (session == null) {
             if (fallbackText.trim().isNotEmpty()) {
                 ttsThread = thread(isDaemon = true, name = "tts-speak") {
-                    speakStreaming(fallbackText)
+                    speakStreaming(fallbackText, isFinal = true)
                 }
             }
             return
@@ -944,7 +947,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 // queue would otherwise stop() this playback mid-sentence.
                 if (!playedServerAudio && fallbackText.trim().isNotEmpty()) {
                     try {
-                        speakStreaming(fallbackText)
+                        speakStreaming(fallbackText, isFinal = true)
                     } catch (e: Exception) {
                         System.out.println("MuseGadgetTts: device TTS failed: " + e.javaClass.simpleName)
                     }

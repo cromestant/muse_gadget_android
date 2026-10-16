@@ -246,6 +246,7 @@ class MuseTurnTracker(
         // already bound keeps binding: a later event for the same id (e.g. an
         // empty `delta.message_done` marker carrying a task parent) must not
         // unbind it — Python only ignores ids with no bound reply.
+        var reply = replies[messageId]
         if (parent != null && parent !in userIds && parent !in replies &&
             !(scoped && parent == messageId)
         ) {
@@ -255,7 +256,6 @@ class MuseTurnTracker(
                 return emptyList()
             }
         }
-        var reply = replies[messageId]
         if (reply == null) {
             if (replies.size >= MAX_MESSAGES) {
                 throw IllegalArgumentException("Muse returned too many messages for one request")

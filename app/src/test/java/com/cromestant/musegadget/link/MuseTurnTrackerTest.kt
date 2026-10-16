@@ -220,6 +220,45 @@ class MuseTurnTrackerTest {
     }
 
     @Test
+    fun emptyDoneMarkerKeepsStreamedTextAndMarksDone() {
+        // Wire shape from muse_chat_link.c:393 — `delta.message_done` arrives
+        // with the same id but no parent and no text fields.
+        val tracker = MuseTurnTracker(sessionId = "side", ownsChat = true)
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1", "session_id" to "side")))
+        tracker.feed(event("delta.message_start", mapOf("message_id" to "m1", "reply_to_message_id" to "u1", "session_id" to "side")))
+        tracker.feed(event("delta.text_append", mapOf("message_id" to "m1", "text" to "Got", "session_id" to "side")))
+        val out = tracker.feed(event("delta.message_done", mapOf("message_id" to "m1", "session_id" to "side")))
+        assertEquals(1, out.size)
+        val reply = out[0] as TurnEvent.Reply
+        assertTrue(reply.done)
+        assertEquals("Got", reply.text)
+        assertEquals(listOf("m1"), tracker.doneMessageIds())
+        assertEquals("Got", tracker.finalText())
+    }
+
+    @Test
+    fun doneWithForeignParentOnBoundReplyStillBinds() {
+        // A later event for an already-bound id must not unbind it, even
+        // when its parent names some other task (Python `_message` only
+        // ignores ids with no bound reply).
+        val tracker = MuseTurnTracker(sessionId = "side", ownsChat = true)
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1", "session_id" to "side")))
+        tracker.feed(event("delta.message_start", mapOf("message_id" to "m1", "reply_to_message_id" to "u1", "session_id" to "side")))
+        val out = tracker.feed(
+            event(
+                "delta.message_done",
+                mapOf(
+                    "message_id" to "m1", "reply_to_message_id" to "task-xyz",
+                    "display_text" to "Full answer", "session_id" to "side",
+                ),
+            ),
+        )
+        assertEquals(1, out.size)
+        assertTrue((out[0] as TurnEvent.Reply).done)
+        assertEquals("Full answer", tracker.finalText())
+    }
+
+    @Test
     fun agentStatusAndBusy() {
         val tracker = MuseTurnTracker()
         tracker.acknowledge(mapOf("message_id" to "u1"))

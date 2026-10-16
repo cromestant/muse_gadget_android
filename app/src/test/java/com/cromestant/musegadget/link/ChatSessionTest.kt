@@ -108,6 +108,52 @@ class ChatSessionTest {
         assertNull(tracker.ackSessionId)
     }
 
+    // --- voiceTurnSettled ---
+
+    @Test
+    fun voiceTurnNeverSettlesWhenEmpty() {
+        // complete() is vacuously true on a quiet empty turn; the loop must
+        // still wait for the 25 s deadline so a slow server gets its chance.
+        val tracker = MuseTurnTracker()
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1")))
+        assertTrue(tracker.complete(tracker.lastActivityMs + 30_000))
+        assertFalse(voiceTurnSettled(tracker, tracker.lastActivityMs + 30_000))
+    }
+
+    @Test
+    fun voiceTurnDoesNotSettleWhileReplyUndone() {
+        val tracker = MuseTurnTracker()
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1")))
+        tracker.feed(
+            mapOf(
+                "type" to "event", "event" to "delta.text_append",
+                "payload" to mapOf("message_id" to "m1", "text" to "Got"),
+            )
+        )
+        assertTrue(tracker.hasReplies())
+        assertFalse(voiceTurnSettled(tracker, tracker.lastActivityMs + 30_000))
+    }
+
+    @Test
+    fun voiceTurnSettlesWhenDoneAndQuiet() {
+        val tracker = MuseTurnTracker()
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1")))
+        tracker.feed(
+            mapOf(
+                "type" to "event", "event" to "delta.text_append",
+                "payload" to mapOf("message_id" to "m1", "text" to "Got"),
+            )
+        )
+        tracker.feed(
+            mapOf(
+                "type" to "event", "event" to "delta.message_done",
+                "payload" to mapOf("message_id" to "m1"),
+            )
+        )
+        assertFalse(voiceTurnSettled(tracker, tracker.lastActivityMs + 1000))
+        assertTrue(voiceTurnSettled(tracker, tracker.lastActivityMs + 3000))
+    }
+
     // --- selectTtsAudio path diagnostics ---
 
     @Test
