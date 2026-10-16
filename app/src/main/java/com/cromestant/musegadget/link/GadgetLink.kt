@@ -97,6 +97,16 @@ internal class ChatFanout(private val replayCap: Int = 500) {
     }
 }
 
+/**
+ * Idle-poll rule for the voice-turn loop: end the turn only when Muse is
+ * done AND at least one reply bound. `MuseTurnTracker.complete()` is true
+ * on a silent turn with zero replies (vacuous), so without the
+ * [MuseTurnTracker.hasReplies] guard a slow server would end the turn at
+ * the first 5 s poll instead of at the 25 s deadline.
+ */
+internal fun voiceTurnSettled(tracker: MuseTurnTracker, nowMs: Long = System.currentTimeMillis()): Boolean =
+    tracker.hasReplies() && tracker.complete(nowMs)
+
 /** Reconnect delay math, mirroring `Backoff.next_delay` in `service.py:61`. */
 internal fun backoffDelay(failures: Int, floor: Double): Double {
     val delay = minOf(2.0 * 2.0.pow(minOf(failures, 16)), 60.0)
@@ -778,7 +788,6 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     System.out.println("MuseGadgetVoice: acked, reading shared feed")
                     val deadline = System.currentTimeMillis() + 25_000
                     var spokenText = ""
-                    var lastTextMs = 0L
                     // Streaming TTS: track how much text has been sent to TTS.
                     var streamedUpTo = 0
                     while (System.currentTimeMillis() < deadline) {
@@ -788,9 +797,13 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             throw e
                         }
                         if (ev == null) {
-                            // Quiet timeout: if we have text and nothing new for 6s, speak it.
-                            if (spokenText.trim().isNotEmpty() &&
-                                System.currentTimeMillis() - lastTextMs > 3_000) break
+                            // Idle poll timeout: end the turn only when Muse
+                            // is actually done (all replies done + 3 s quiet,
+                            // mirroring `MuseTurn.complete`), and never on an
+                            // empty turn — a slow server may take most of the
+                            // 25 s deadline before its first delta. Otherwise
+                            // keep waiting for the deadline.
+                            if (voiceTurnSettled(tracker)) break
                             continue
                         }
                         System.out.println("MuseGadgetVoice: " + describeChatEvent(ev))
@@ -811,7 +824,6 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                                 val txt = te.text
                                 if (txt.trim().isNotEmpty()) {
                                     spokenText = txt
-                                    lastTextMs = System.currentTimeMillis()
                                     // Extract and speak complete sentences immediately.
                                     if (txt.length > streamedUpTo) {
                                         val (sentences, newIdx) = extractSentences(txt, streamedUpTo)
@@ -857,6 +869,9 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             ttsThread?.interrupt()
         } catch (e: Exception) {
         }
+        // Drop queued (not yet spoken) sentences so barge-in actually
+        // silences streaming speech instead of just the current sentence.
+        try { ttsQueue.clear() } catch (_: Exception) { }
         try {
             ttsPlayer.stop()
         } catch (e: Exception) {
@@ -901,6 +916,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         }
         ttsThread = thread(isDaemon = true, name = "tts-speak") {
             try {
+                var playedServerAudio = false
                 for (id in messageIds) {
                     if (Thread.currentThread().isInterrupted) break
                     System.out.println("MuseGadgetTts: fetching reply audio")
@@ -912,13 +928,21 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     }
                     if (Thread.currentThread().isInterrupted) break
                     if (mp3 != null) {
+                        // Full server audio supersedes streaming fragments:
+                        // drop them so they can't talk over (or after) it.
+                        if (!playedServerAudio) {
+                            try { ttsQueue.clear() } catch (_: Exception) { }
+                        }
+                        // Blocking: plays fully before the next id starts.
                         ttsPlayer.play(mp3)
+                        playedServerAudio = true
                     } else {
                         System.out.println("MuseGadgetTts: no audio for reply, skipping")
                     }
                 }
-                // Fallback: device TTS speaks the reply text directly.
-                if (fallbackText.trim().isNotEmpty()) {
+                // Fallback only when no server audio played: the streaming
+                // queue would otherwise stop() this playback mid-sentence.
+                if (!playedServerAudio && fallbackText.trim().isNotEmpty()) {
                     try {
                         speakStreaming(fallbackText)
                     } catch (e: Exception) {

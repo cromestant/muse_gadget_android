@@ -3,15 +3,17 @@ package com.cromestant.musegadget.audio
 import android.content.Context
 import android.media.MediaPlayer
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Speaks Muse's TTS MP3 replies through the device speaker.
  *
  * Owned by [com.cromestant.musegadget.link.GadgetLink] (service scope, not the
  * activity) so playback survives activity recreation. [stop] is the PTT
- * barge-in: it halts playback and releases the player. All methods are
- * thread-safe; [play] blocks the caller during prepare, so call it off the
- * UI thread.
+  * barge-in: it halts playback and releases the player. All methods are
+  * thread-safe; [play] blocks the caller during prepare + playback, so call
+  * it off the UI thread.
  */
 class TtsPlayer(appContext: Context) {
     private val cacheDir: File = appContext.cacheDir
@@ -50,8 +52,11 @@ class TtsPlayer(appContext: Context) {
     }
 
     /**
-     * Play MP3 bytes, stopping anything currently playing first. If [stop]
-     * races the prepare, the new audio is discarded, never orphaned playing.
+     * Play MP3 bytes, stopping anything currently playing first. Blocks the
+     * caller until playback completes (or is stopped), so queued sentences
+     * play sequentially instead of each one cutting off the previous.
+     * If [stop] races the prepare, the new audio is discarded, never
+     * orphaned playing.
      */
     fun play(mp3: ByteArray) {
         if (mp3.isEmpty()) return
@@ -67,11 +72,16 @@ class TtsPlayer(appContext: Context) {
             return
         }
         val mp = MediaPlayer()
+        val done = CountDownLatch(1)
         try {
             mp.setDataSource(f.absolutePath)
             mp.setOnCompletionListener {
                 System.out.println("MuseGadgetTts: playback complete")
-                stop()
+                done.countDown()
+            }
+            mp.setOnErrorListener { _, _, _ ->
+                done.countDown()
+                true
             }
             mp.prepare()
         } catch (e: Exception) {
@@ -108,7 +118,35 @@ class TtsPlayer(appContext: Context) {
         } catch (e: Exception) {
             System.out.println("MuseGadgetTts: start failed: " + e.javaClass.simpleName)
             stop()
+            return
         }
+        // Block until done, stopped (generation bump), or timeout, so the
+        // next queued sentence can't stop() this one mid-word.
+        // ponytail: 60s ceiling, duration+10s would be more precise
+        val deadlineMs = System.currentTimeMillis() + 60_000
+        while (System.currentTimeMillis() < deadlineMs) {
+            val currentGen = synchronized(lock) { generation }
+            if (currentGen != gen) return // stopped or superseded
+            if (Thread.currentThread().isInterrupted) return
+            try {
+                if (done.await(250, TimeUnit.MILLISECONDS)) break
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+        // Release our player only if nobody superseded us.
+        val ours: MediaPlayer?
+        val oursFile: File?
+        synchronized(lock) {
+            if (gen != generation || player !== mp) return
+            ours = player
+            player = null
+            oursFile = tmpFile
+            tmpFile = null
+        }
+        try { ours?.release() } catch (_: Exception) { }
+        try { if (oursFile != null && oursFile.exists()) oursFile.delete() } catch (_: Exception) { }
     }
 
     /** Release everything; call from the owner's stop path. */

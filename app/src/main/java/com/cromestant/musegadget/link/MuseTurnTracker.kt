@@ -242,13 +242,18 @@ class MuseTurnTracker(
         // A message binds when its parent is a user id or an already-bound reply
         // (mirrors `_message` in `muse_turn.py:393`). On the owned side chat a
         // parentless or self-parented message is also ours (`scoped`); anything
-        // else is another thread's and is ignored from here on.
+        // else is another thread's and is ignored from here on. A reply that
+        // already bound keeps binding: a later event for the same id (e.g. an
+        // empty `delta.message_done` marker carrying a task parent) must not
+        // unbind it — Python only ignores ids with no bound reply.
         if (parent != null && parent !in userIds && parent !in replies &&
             !(scoped && parent == messageId)
         ) {
-            ignored.add(messageId)
-            trace("drop " + name + " msg=" + shortId(messageId) + " parent=" + shortId(parent) + " scoped=" + scoped)
-            return emptyList()
+            if (reply == null) {
+                ignored.add(messageId)
+                trace("drop " + name + " msg=" + shortId(messageId) + " parent=" + shortId(parent) + " scoped=" + scoped)
+                return emptyList()
+            }
         }
         var reply = replies[messageId]
         if (reply == null) {
@@ -268,19 +273,25 @@ class MuseTurnTracker(
             }
         }
         if (name == "delta.message_done" || name == "message.assistant") {
-            var completed = payload["display_text"] as? String
-            if (completed == null) {
+            // An empty `delta.message_done` marker (same id, no text fields —
+            // the server's per-chunk shape, cf. `muse_chat_link.c:393`) must
+            // NOT wipe the streamed deltas. Mirror Python's
+            // `if isinstance(completed_text, str)` in `muse_turn.py:431`: only
+            // a present String replaces the streamed text.
+            val display = payload["display_text"] as? String
+            val completed: String? = if (display != null) {
+                display
+            } else {
                 val transcript = payload["transcript"]
-                completed = if (transcript is String) {
+                if (transcript is String) {
                     transcript
                 } else {
-                    transcriptText(transcript, messageId)
-                }
-                if (completed.isEmpty() && transcript !is String) {
-                    completed = payload["content"] as? String ?: ""
+                    val fromTranscript = transcriptText(transcript, messageId)
+                    if (fromTranscript.isNotEmpty()) fromTranscript
+                    else payload["content"] as? String
                 }
             }
-            reply.text = stripControls(completed)
+            if (completed != null) reply.text = stripControls(completed)
             if (name == "delta.message_done" || payload["display_text_ready"] != false) {
                 reply.done = true
             }
