@@ -53,6 +53,8 @@ internal fun describeChatEvent(ev: Map<String, Any?>): String {
     if (sess != null) sb.append(" sess=").append(sess.take(8))
     if (mid != null) sb.append(" msg=").append(mid.take(12))
     if (replyTo != null) sb.append(" replyTo=").append(replyTo.take(12))
+    val role = payload?.get("role") as? String
+    if (role != null) sb.append(" role=").append(role)
     if (name == "delta.message_start" && payload != null) {
         sb.append(" keys=").append(payload.keys.joinToString(","))
         val idVal = payload["id"] as? String
@@ -542,7 +544,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         }
                         val chatSessionId =
                             if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
-                        System.out.println("MuseGadgetBg: subscribing for digest updates")
+                        System.out.println("MuseGadgetBg: subscribing sess=" + (chatSessionId ?: "shared") + " gadget=" + GADGET_SIDE_CHAT_ID)
                         val sub = try {
                             session.subscribeChat(chatSessionId)
                         } catch (e: InterruptedException) {
@@ -560,6 +562,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                                     break
                                 }
                                 if (ev == null) continue
+                                System.out.println("MuseGadgetPump: " + describeChatEvent(ev))
                                 chatBus.publish(ev)
                             }
                         } finally {
@@ -604,7 +607,14 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             break
                         } ?: continue
                         System.out.println("MuseGadgetBg: " + describeChatEvent(ev))
-                        val update = extractBgText(ev) ?: continue
+                        val update = extractBgText(ev)
+                        if (update == null) {
+                            val name = ev["event"] as? String ?: ""
+                            if (name.startsWith("delta.") || name.startsWith("message.")) {
+                                System.out.println("MuseGadgetBg: dropped " + describeChatEvent(ev))
+                            }
+                            continue
+                        }
                         val (msgId, text, done) = update
                         val buf = buffers.getOrPut(msgId) { StringBuilder() }
                         // Done events carry the full text; deltas are fragments.
