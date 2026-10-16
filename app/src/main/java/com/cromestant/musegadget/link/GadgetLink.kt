@@ -62,6 +62,36 @@ internal fun describeChatEvent(ev: Map<String, Any?>): String {
     return sb.toString()
 }
 
+/**
+ * Shared chat fan-out: one `subscribeChat` owner publishes each event to
+ * every tap, keeping a capped replay buffer so a late joiner (voice turn)
+ * sees what arrived before it subscribed. Pure JVM, no Android.
+ */
+internal class ChatFanout(private val replayCap: Int = 500) {
+    private val lock = Any()
+    private val taps = java.util.concurrent.CopyOnWriteArrayList<LinkedBlockingQueue<Map<String, Any?>>>()
+    private val replay = ArrayDeque<Map<String, Any?>>()
+
+    fun publish(ev: Map<String, Any?>) {
+        synchronized(lock) {
+            replay.addLast(ev)
+            while (replay.size > replayCap) replay.removeFirst()
+        }
+        for (tap in taps) tap.offer(ev)
+    }
+
+    fun subscribe(): LinkedBlockingQueue<Map<String, Any?>> {
+        val q = LinkedBlockingQueue<Map<String, Any?>>()
+        synchronized(lock) { for (ev in replay) q.offer(ev) }
+        taps.add(q)
+        return q
+    }
+
+    fun unsubscribe(q: LinkedBlockingQueue<Map<String, Any?>>) {
+        taps.remove(q)
+    }
+}
+
 /** Reconnect delay math, mirroring `Backoff.next_delay` in `service.py:61`. */
 internal fun backoffDelay(failures: Int, floor: Double): Double {
     val delay = minOf(2.0 * 2.0.pow(minOf(failures, 16)), 60.0)
@@ -238,7 +268,22 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     }
     @Volatile private var ttsThread: Thread? = null
     @Volatile private var bgChatThread: Thread? = null
+    @Volatile private var bgTap: LinkedBlockingQueue<Map<String, Any?>>? = null
     @Volatile private var onBackgroundMessage: ((String, String) -> Unit)? = null
+
+    /**
+     * Single shared chat feed. Transport-wise two `subscribeChat` calls get
+     * different stream ids and both stay open (see `LinkSession.route`: demux
+     * by stream id), but server-side they compete for the same session's
+     * events — voice deltas land in the background sub (where
+     * `tryParseStructured` drops them) and digest JSON lands in the voice
+     * sub (where the turn tracker ignores it). So neither side completes.
+     * One pump thread owns the single subscription and fans each event out
+     * to every tap; voice turns subscribe-before-post so nothing is missed.
+     */
+    private val chatBus = ChatFanout()
+    private var chatPumpThread: Thread? = null
+    private val chatPumpLock = Any()
     @Volatile private var lastRotateAttemptMs: Long = Long.MIN_VALUE / 2
     @Volatile private var forceRefresh: Boolean = false
 
@@ -466,48 +511,41 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     }
 
     /**
-     * Start background chat subscription for digest updates.
-     * Runs in a daemon thread, reconnects on failure.
+     * Pump thread: the ONE `subscribeChat` owner. Reconnects across sessions
+     * and fans every event out to all taps plus a small replay buffer for
+     * late joiners (voice turns). Started lazily, daemon, idempotent.
      */
-    fun startBackgroundChatListener() {
-        synchronized(this) {
-            if (bgChatThread?.isAlive == true) return
+    private fun ensureChatPump() {
+        synchronized(chatPumpLock) {
+            if (chatPumpThread?.isAlive == true) return
             val t = Thread({
                 while (!Thread.currentThread().isInterrupted) {
                     try {
-                        val cur = current
-                        if (cur == null) {
+                        val session = current
+                        if (session == null) {
                             Thread.sleep(5000); continue
                         }
-                        val session = cur
-                        val chatSessionId = if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
+                        val chatSessionId =
+                            if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
                         System.out.println("MuseGadgetBg: subscribing for digest updates")
-                        val sub = session.subscribeChat(chatSessionId)
+                        val sub = try {
+                            session.subscribeChat(chatSessionId)
+                        } catch (e: InterruptedException) {
+                            break
+                        } catch (e: Exception) {
+                            System.out.println("MuseGadgetBg: error: " + e.javaClass.simpleName)
+                            try { Thread.sleep(5000) } catch (_: InterruptedException) { break }
+                            continue
+                        }
                         try {
-                            val buffers = mutableMapOf<String, StringBuilder>()
-                            while (!Thread.currentThread().isInterrupted) {
+                            while (!Thread.currentThread().isInterrupted && current === session) {
                                 val ev = try { sub.nextEvent(30000) }
                                 catch (e: Exception) {
                                     System.out.println("MuseGadgetBg: event error: " + e.javaClass.simpleName)
                                     break
                                 }
                                 if (ev == null) continue
-                                System.out.println("MuseGadgetBg: " + describeChatEvent(ev))
-                                val update = extractBgText(ev) ?: continue
-                                val (msgId, text, done) = update
-                                val buf = buffers.getOrPut(msgId) { StringBuilder() }
-                                // Done events carry the full text; deltas are fragments.
-                                if (done) {
-                                    buf.clear()
-                                    buf.append(text)
-                                } else {
-                                    buf.append(text)
-                                }
-                                if (tryParseStructured(buf.toString())) {
-                                    if (done) buffers.remove(msgId)
-                                } else if (done) {
-                                    buffers.remove(msgId)
-                                }
+                                chatBus.publish(ev)
                             }
                         } finally {
                             try { sub.close() } catch (_: Exception) { }
@@ -522,6 +560,58 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             }, "muse-bg-chat")
             t.isDaemon = true
             t.start()
+            chatPumpThread = t
+        }
+    }
+
+    /** Register a fan-out tap, pre-filled with the replay buffer. */
+    private fun subscribeTap(): LinkedBlockingQueue<Map<String, Any?>> = chatBus.subscribe()
+
+    private fun unsubscribeTap(q: LinkedBlockingQueue<Map<String, Any?>>) = chatBus.unsubscribe(q)
+
+    /**
+     * Start background digest consumer on the shared chat feed.
+     * Runs in a daemon thread; the pump owns the subscription.
+     */
+    fun startBackgroundChatListener() {
+        synchronized(this) {
+            if (bgChatThread?.isAlive == true) return
+            ensureChatPump()
+            val tap = subscribeTap()
+            bgTap = tap
+            val t = Thread({
+                try {
+                    val buffers = mutableMapOf<String, StringBuilder>()
+                    while (!Thread.currentThread().isInterrupted) {
+                        val ev = try {
+                            tap.poll(30, java.util.concurrent.TimeUnit.SECONDS)
+                        } catch (e: InterruptedException) {
+                            break
+                        } ?: continue
+                        System.out.println("MuseGadgetBg: " + describeChatEvent(ev))
+                        val update = extractBgText(ev) ?: continue
+                        val (msgId, text, done) = update
+                        val buf = buffers.getOrPut(msgId) { StringBuilder() }
+                        // Done events carry the full text; deltas are fragments.
+                        if (done) {
+                            buf.clear()
+                            buf.append(text)
+                        } else {
+                            buf.append(text)
+                        }
+                        if (tryParseStructured(buf.toString())) {
+                            if (done) buffers.remove(msgId)
+                        } else if (done) {
+                            buffers.remove(msgId)
+                        }
+                    }
+                } finally {
+                    unsubscribeTap(tap)
+                    if (bgTap === tap) bgTap = null
+                }
+            }, "muse-bg-consumer")
+            t.isDaemon = true
+            t.start()
             bgChatThread = t
         }
     }
@@ -529,6 +619,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     fun stopBackgroundChatListener() {
         try { bgChatThread?.interrupt() } catch (_: Exception) { }
         bgChatThread = null
+        // Tap is removed by the consumer thread's finally; drop our ref so a
+        // stuck thread can't keep the queue fanned out to forever.
+        bgTap?.let { unsubscribeTap(it) }
+        bgTap = null
     }
 
     /**
@@ -621,22 +715,31 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             try {
                 val chatSessionId = if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
                 System.out.println("MuseGadgetVoice: chatSession=" + (chatSessionId?.take(8) ?: "shared"))
-                val ack = session.sendVoiceNoteJson(json, chatSessionId)
-                System.out.println("MuseGadgetVoice: chat/stream ack ok=" + ack["ok"] + " status=" + ack["status"])
-                if (ack["ok"] != true) {
-                    listener.onError("chat/stream HTTP ${ack["status"]}")
-                    return@thread
-                }
-                @Suppress("UNCHECKED_CAST")
-                val body = ack["response"] as? Map<String, Any?> ?: emptyMap()
+                // Tap the shared feed BEFORE posting: the pump owns the single
+                // subscription, and the replay buffer covers anything already seen.
+                ensureChatPump()
+                val tap = subscribeTap()
                 val tracker = MuseTurnTracker()
-                tracker.acknowledge(body)
-                System.out.println("MuseGadgetVoice: ack keys=" + body.keys.joinToString(",") +
-                    " ackSession=" + (tracker.ackSessionId?.take(8) ?: "none"))
-                listener.onAck()
-                System.out.println("MuseGadgetVoice: acked, subscribing")
-                val sub = session.subscribeChat(chatSessionId)
                 try {
+                    val ack = session.sendVoiceNoteJson(json, chatSessionId)
+                    System.out.println("MuseGadgetVoice: chat/stream ack ok=" + ack["ok"] + " status=" + ack["status"])
+                    if (ack["ok"] != true) {
+                        listener.onError("chat/stream HTTP ${ack["status"]}")
+                        return@thread
+                    }
+                    @Suppress("UNCHECKED_CAST")
+                    val body = ack["response"] as? Map<String, Any?> ?: emptyMap()
+                    // Replay-then-live: drain everything the tap already holds,
+                    // then continue live. Fed post-ack so parent matching applies.
+                    // ponytail: unbounded drain, replay capped at 500 events
+                    val preAck = mutableListOf<Map<String, Any?>>()
+                    tap.drainTo(preAck)
+                    tracker.acknowledge(body)
+                    for (ev in preAck) tracker.feed(ev)
+                    System.out.println("MuseGadgetVoice: ack keys=" + body.keys.joinToString(",") +
+                        " ackSession=" + (tracker.ackSessionId?.take(8) ?: "none"))
+                    listener.onAck()
+                    System.out.println("MuseGadgetVoice: acked, reading shared feed")
                     val deadline = System.currentTimeMillis() + 25_000
                     var spokenText = ""
                     var lastTextMs = 0L
@@ -644,7 +747,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     var streamedUpTo = 0
                     while (System.currentTimeMillis() < deadline) {
                         val ev = try {
-                            sub.nextEvent(5_000)
+                            tap.poll(5, java.util.concurrent.TimeUnit.SECONDS)
                         } catch (e: Exception) {
                             throw e
                         }
@@ -682,16 +785,13 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     if (remaining.isNotEmpty()) {
                         speakStreaming(remaining)
                     }
+                    val finalText = tracker.finalText()
+                    System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length)
+                    listener.onFinal(finalText)
+                    speakReplies(tracker.doneMessageIds(), tracker.allText())
                 } finally {
-                    try {
-                        sub.close()
-                    } catch (e: Exception) {
-                    }
+                    unsubscribeTap(tap)
                 }
-                val finalText = tracker.finalText()
-                System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length)
-                listener.onFinal(finalText)
-                speakReplies(tracker.doneMessageIds(), tracker.allText())
             } catch (e: Exception) {
                 System.out.println("MuseGadgetVoice: turn EX " + e.javaClass.simpleName + ": " + e.message)
                 listener.onError(e.message ?: e.javaClass.simpleName)
