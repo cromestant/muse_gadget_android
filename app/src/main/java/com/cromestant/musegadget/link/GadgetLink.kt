@@ -85,9 +85,9 @@ internal class ChatFanout(private val replayCap: Int = 500) {
         for (tap in taps) tap.offer(ev)
     }
 
-    fun subscribe(): LinkedBlockingQueue<Map<String, Any?>> {
+    fun subscribe(replay: Boolean = true): LinkedBlockingQueue<Map<String, Any?>> {
         val q = LinkedBlockingQueue<Map<String, Any?>>()
-        synchronized(lock) { for (ev in replay) q.offer(ev) }
+        if (replay) synchronized(lock) { for (ev in this.replay) q.offer(ev) }
         taps.add(q)
         return q
     }
@@ -200,31 +200,24 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     /**
      * Enqueue [text] for streaming TTS playback. Splits into sentences, non-blocking.
      * Mid-turn streaming ([isFinal] = false) queues only COMPLETE sentences
-     * (with terminal . ! ?): queuing a short partial fragment as-is is what
-     * spoke a lone first word ("Got") while the rest of the reply was still
-     * arriving. The end-of-turn flush and fallbacks pass [isFinal] = true so
-     * a short complete reply (or the final fragment) still speaks.
+     * (with terminal . ! ?); the trailing partial fragment stays unqueued
+     * until the next delta completes it. The end-of-turn flush passes
+     * [isFinal] = true so the final fragment speaks too. Returns true when
+     * anything was offered (drives the speakReplies skip).
      */
-    private fun speakStreaming(text: String, isFinal: Boolean = false) {
+    private fun speakStreaming(text: String, isFinal: Boolean = false): Boolean {
         val clean = text.trim()
-        if (clean.isEmpty()) return
+        if (clean.isEmpty()) return false
         ensureTtsWorker()
         // Split into sentences for smoother streaming playback.
-        // Only queue COMPLETE sentences (with terminal . ! ?). Partial trailing
-        // text is skipped here; the voice loop flushes it after the turn ends.
-        val (sentences, _) = extractSentences(clean, 0)
-        val toQueue = if (sentences.isEmpty()) {
-            // No complete sentences found. If this is the final text and it is
-            // short with no sentence boundaries, queue as-is (likely a
-            // complete short reply). Otherwise skip (partial streaming text).
-            if (isFinal && !clean.contains('.') && !clean.contains('!') && !clean.contains('?') && clean.length < 200) {
-                listOf(clean)
-            } else {
-                emptyList()
-            }
+        val (sentences, newIdx) = extractSentences(clean, 0)
+        val toQueue = if (isFinal) {
+            val rest = clean.substring(newIdx).trim()
+            if (rest.isNotEmpty()) sentences + rest else sentences
         } else {
             sentences
         }
+        if (toQueue.isEmpty()) return false
         // Deduplicate per-sentence: skip if queued in the last 30s
         // (voice turn loop and speakReplies can both fire for the same reply).
         val now = System.currentTimeMillis()
@@ -243,6 +236,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 ttsQueue.offer(sentence)
             }
         }
+        return true
     }
 
     /**
@@ -599,8 +593,9 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         }
     }
 
-    /** Register a fan-out tap, pre-filled with the replay buffer. */
-    private fun subscribeTap(): LinkedBlockingQueue<Map<String, Any?>> = chatBus.subscribe()
+    /** Register a fan-out tap; voice turns pass replay=false (subscribed pre-post). */
+    private fun subscribeTap(replay: Boolean = true): LinkedBlockingQueue<Map<String, Any?>> =
+        chatBus.subscribe(replay)
 
     private fun unsubscribeTap(q: LinkedBlockingQueue<Map<String, Any?>>) = chatBus.unsubscribe(q)
 
@@ -771,10 +766,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
             try {
                 val chatSessionId = if (USE_DEDICATED_CHAT_SESSION) gadgetChatSessionId() else null
                 System.out.println("MuseGadgetVoice: chatSession=" + (chatSessionId?.take(8) ?: "shared"))
-                // Tap the shared feed BEFORE posting: the pump owns the single
-                // subscription, and the replay buffer covers anything already seen.
+                // Tap the shared feed BEFORE posting, without replay: the tap
+                // captures everything from here on, so nothing is missed.
                 ensureChatPump()
-                val tap = subscribeTap()
+                val tap = subscribeTap(false)
                 // Owned side-chat turn: every assistant message on this chat
                 // binds even without a parent link (mirrors owns_chat in
                 // muse_turn.py); other chats' events are dropped.
@@ -788,22 +783,19 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                     }
                     @Suppress("UNCHECKED_CAST")
                     val body = ack["response"] as? Map<String, Any?> ?: emptyMap()
-                    // Replay-then-live: drain everything the tap already holds,
-                    // then continue live. Fed post-ack so parent matching applies.
-                    // ponytail: unbounded drain, replay capped at 500 events
-                    val preAck = mutableListOf<Map<String, Any?>>()
-                    tap.drainTo(preAck)
                     tracker.acknowledge(body)
-                    for (ev in preAck) tracker.feed(ev)
                     System.out.println("MuseGadgetVoice: ack keys=" + body.keys.joinToString(",") +
                         " ackSession=" + (tracker.ackSessionId?.take(8) ?: "none"))
                     listener.onAck()
                     System.out.println("MuseGadgetVoice: acked, reading shared feed")
-                    val deadline = System.currentTimeMillis() + 25_000
-                    var spokenText = ""
-                    // Streaming TTS: track how much text has been sent to TTS.
-                    var streamedUpTo = 0
-                    while (System.currentTimeMillis() < deadline) {
+                    var deadlineMs = System.currentTimeMillis() + 90_000
+                    var lastActivityMs = tracker.lastActivityMs
+                    // Streaming TTS: per-message offset into the streamed
+                    // deltas, plus the latest streamed text for the flush.
+                    val streamedUpTo: HashMap<String, Int> = LinkedHashMap()
+                    val streamedText: HashMap<String, String> = LinkedHashMap()
+                    var spokeAnything = false
+                    while (System.currentTimeMillis() < deadlineMs) {
                         val ev = try {
                             tap.poll(5, java.util.concurrent.TimeUnit.SECONDS)
                         } catch (e: Exception) {
@@ -814,7 +806,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             // is actually done (all replies done + 3 s quiet,
                             // mirroring `MuseTurn.complete`), and never on an
                             // empty turn — a slow server may take most of the
-                            // 25 s deadline before its first delta. Otherwise
+                            // 90 s deadline before its first delta. Otherwise
                             // keep waiting for the deadline.
                             if (voiceTurnSettled(tracker)) break
                             continue
@@ -834,35 +826,40 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                                 System.out.println("MuseGadgetVoice: reply msg=" + te.messageId.take(8) +
                                     " done=" + te.done + " len=" + te.text.length)
                                 listener.onPartial(te.text)
-                                val txt = te.text
-                                if (txt.trim().isNotEmpty()) {
-                                    spokenText = txt
-                                    // Extract and speak complete sentences immediately.
-                                    if (txt.length > streamedUpTo) {
-                                        val (sentences, newIdx) = extractSentences(txt, streamedUpTo)
-                                        for (sentence in sentences) {
-                                            speakStreaming(sentence)
-                                        }
-                                        streamedUpTo = newIdx
+                                // Slice the append-only streamed deltas (te.text
+                                // is replaced by the final text on done).
+                                streamedText[te.messageId] = te.streamed
+                                val seen = streamedUpTo[te.messageId] ?: 0
+                                if (te.streamed.length > seen) {
+                                    val (sentences, newIdx) = extractSentences(te.streamed, seen)
+                                    for (sentence in sentences) {
+                                        if (speakStreaming(sentence)) spokeAnything = true
                                     }
+                                    streamedUpTo[te.messageId] = newIdx
                                 }
                             }
                             is TurnEvent.AgentStatus -> {}
                             TurnEvent.TaskFinished -> {}
                         }
-                        if (tracker.complete()) break
+                        val activityMs = tracker.lastActivityMs
+                        if (activityMs != lastActivityMs) {
+                            lastActivityMs = activityMs
+                            deadlineMs = System.currentTimeMillis() + 90_000
+                        }
+                        if (voiceTurnSettled(tracker)) break
                     }
-                    // Flush any remaining text after the turn completes.
-                    val remaining = spokenText.substring(streamedUpTo.coerceAtMost(spokenText.length)).trim()
-                    if (remaining.isNotEmpty()) {
-                        speakStreaming(remaining, isFinal = true)
+                    // Flush each reply's unspoken streamed tail after the turn.
+                    for ((msgId, streamed) in streamedText) {
+                        val seen = streamedUpTo[msgId] ?: 0
+                        val tail = streamed.substring(seen.coerceAtMost(streamed.length)).trim()
+                        if (tail.isNotEmpty() && speakStreaming(tail, isFinal = true)) spokeAnything = true
                     }
                     val finalText = tracker.finalText()
                     System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length +
                         " doneIds=" + tracker.doneMessageIds().size +
                         " hasReplies=" + tracker.hasReplies())
                     listener.onFinal(finalText)
-                    speakReplies(tracker.doneMessageIds(), tracker.allText())
+                    if (!spokeAnything) speakReplies(tracker.doneMessageIds(), tracker.allText())
                 } finally {
                     unsubscribeTap(tap)
                 }

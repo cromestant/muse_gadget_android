@@ -122,8 +122,7 @@ class TtsPlayer(appContext: Context) {
         }
         // Block until done, stopped (generation bump), or timeout, so the
         // next queued sentence can't stop() this one mid-word.
-        // ponytail: 60s ceiling, duration+10s would be more precise
-        val deadlineMs = System.currentTimeMillis() + 60_000
+        val deadlineMs = System.currentTimeMillis() + mp.duration.coerceAtLeast(0) + 10_000
         while (System.currentTimeMillis() < deadlineMs) {
             val currentGen = synchronized(lock) { generation }
             if (currentGen != gen) return // stopped or superseded

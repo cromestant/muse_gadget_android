@@ -63,7 +63,6 @@ class MuseTurnTracker(
     private var acknowledged = false
     private var busy = false
     private var taskFinished = false
-    private var taskFinishedEmitted = false
 
     /** Last state-changing event, mirroring `MuseTurn.last_activity` in `muse_turn.py:212`. */
     var lastActivityMs: Long = System.currentTimeMillis()
@@ -150,16 +149,16 @@ class MuseTurnTracker(
             pending.add(event)
             return emptyList()
         }
-        if (eventSession != null && sessionId != null && eventSession != sessionId) {
+        if (ownsChat) {
+            if (eventSession != sessionId) return emptyList()
+        } else if (eventSession != null && sessionId != null && eventSession != sessionId) {
             return emptyList()
         }
-        val scoped = ownsChat && sessionId != null &&
-            (eventSession == null || eventSession == sessionId)
+        val scoped = ownsChat && eventSession == sessionId
         val name = event["event"] as? String ?: return emptyList()
         if (name == "agent.status" || name == "task.status") return status(name, payload)
         if (name == "delta.message_start" || name == "delta.text_append" ||
-            name == "delta.message_done" || name == "message.assistant" ||
-            name == "delta.presentation"
+            name == "delta.message_done" || name == "message.assistant"
         ) {
             return message(name, event, payload, scoped)
         }
@@ -211,16 +210,10 @@ class MuseTurnTracker(
         }
         // task.status (mirrors the shared-chat branch of `_status` in `muse_turn.py:348`)
         if (status != null) {
-            if (terminal) {
-                taskFinished = true
-                busy = false
-                if (!taskFinishedEmitted) {
-                    taskFinishedEmitted = true
-                    return listOf(TurnEvent.TaskFinished)
-                }
-            } else {
-                busy = status != "" && status != "idle"
-            }
+            val wasFinished = taskFinished
+            taskFinished = terminal
+            busy = if (terminal) false else status != "" && status != "idle"
+            if (taskFinished && !wasFinished) return listOf(TurnEvent.TaskFinished)
         }
         return emptyList()
     }
@@ -295,30 +288,6 @@ class MuseTurnTracker(
             if (name == "delta.message_done" || payload["display_text_ready"] != false) {
                 reply.done = true
             }
-        }
-        if (name == "delta.presentation") {
-            val data = payload["data"] as? Map<*, *>
-            var fallback: String? = data?.get("fallback_text") as? String
-            if (fallback == null) {
-                // audio/video/image are nested: data.audio.fallback_text etc.
-                for (key in listOf("audio", "videos", "images")) {
-                    val section = data?.get(key)
-                    val candidates = if (section is List<*>) section else listOf(section)
-                    for (c in candidates) {
-                        val m = c as? Map<*, *>
-                        val ft = m?.get("fallback_text") as? String
-                        if (!ft.isNullOrEmpty()) { fallback = ft; break }
-                    }
-                    if (!fallback.isNullOrEmpty()) break
-                }
-            }
-            if (fallback == null) fallback = payload["fallback_text"] as? String
-            if (!fallback.isNullOrEmpty()) {
-                val clean = stripControls(fallback)
-                if (reply.text.isEmpty()) reply.text = clean else reply.text += clean
-                reply.streamed += clean
-            }
-            reply.done = true
         }
         if (reply.text.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES ||
             reply.streamed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES
