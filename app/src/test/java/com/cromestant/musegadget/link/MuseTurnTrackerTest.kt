@@ -128,6 +128,98 @@ class MuseTurnTrackerTest {
     }
 
     @Test
+    fun ownedChatBindsSelfParentedReply() {
+        val tracker = MuseTurnTracker(sessionId = "side", ownsChat = true)
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1", "session_id" to "side")))
+        val out = tracker.feed(
+            event(
+                "delta.message_done",
+                mapOf(
+                    "message_id" to "m1", "reply_to_message_id" to "m1",
+                    "display_text" to "Hi", "session_id" to "side",
+                ),
+            ),
+        )
+        assertEquals(1, out.size)
+        assertEquals("Hi", (out[0] as TurnEvent.Reply).text)
+        assertEquals("Hi", tracker.finalText())
+    }
+
+    @Test
+    fun unownedChatStillDropsSelfParentedReply() {
+        val tracker = MuseTurnTracker()
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1")))
+        assertTrue(
+            tracker.feed(
+                event(
+                    "delta.message_done",
+                    mapOf("message_id" to "m1", "reply_to_message_id" to "m1", "display_text" to "Hi"),
+                ),
+            ).isEmpty()
+        )
+        assertEquals("", tracker.finalText())
+    }
+
+    @Test
+    fun ownedChatDropsForeignSessionEvents() {
+        val tracker = MuseTurnTracker(sessionId = "side", ownsChat = true)
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1", "session_id" to "side")))
+        assertTrue(
+            tracker.feed(
+                event(
+                    "delta.message_done",
+                    mapOf(
+                        "message_id" to "m1", "reply_to_message_id" to "u1",
+                        "display_text" to "Hi", "session_id" to "other",
+                    ),
+                ),
+            ).isEmpty()
+        )
+        assertEquals("", tracker.finalText())
+    }
+
+    @Test
+    fun sessionLearnedFromAckFiltersOtherChats() {
+        val tracker = MuseTurnTracker()
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1", "session_id" to "learned")))
+        assertEquals("learned", tracker.sessionId)
+        assertTrue(
+            tracker.feed(
+                event(
+                    "delta.message_done",
+                    mapOf(
+                        "message_id" to "m1", "reply_to_message_id" to "u1",
+                        "display_text" to "No", "session_id" to "other",
+                    ),
+                ),
+            ).isEmpty()
+        )
+        val out = tracker.feed(
+            event(
+                "delta.message_done",
+                mapOf(
+                    "message_id" to "m2", "reply_to_message_id" to "u1",
+                    "display_text" to "Yes", "session_id" to "learned",
+                ),
+            ),
+        )
+        assertEquals("Yes", (out[0] as TurnEvent.Reply).text)
+    }
+
+    @Test
+    fun ownedChatBindsParentlessReplyOnItsSession() {
+        val tracker = MuseTurnTracker(sessionId = "side", ownsChat = true)
+        tracker.acknowledge(mapOf("result" to mapOf("message_id" to "u1", "session_id" to "side")))
+        val out = tracker.feed(
+            event(
+                "delta.message_done",
+                mapOf("message_id" to "m1", "display_text" to "Hello", "session_id" to "side"),
+            ),
+        )
+        assertEquals("Hello", (out[0] as TurnEvent.Reply).text)
+    }
+
+    @Test
     fun agentStatusAndBusy() {
         val tracker = MuseTurnTracker()
         tracker.acknowledge(mapOf("message_id" to "u1"))

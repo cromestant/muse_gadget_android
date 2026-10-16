@@ -48,6 +48,9 @@ internal fun describeChatEvent(ev: Map<String, Any?>): String {
     val replyTo = (payload?.get("reply_to_message_id") as? String)
         ?: (payload?.get("parent_message_id") as? String)
     val sb = StringBuilder("event name=").append(name)
+    val sess = (payload?.get("session_id") as? String)?.takeIf { it.isNotEmpty() }
+        ?: (ev["session_id"] as? String)?.takeIf { it.isNotEmpty() }
+    if (sess != null) sb.append(" sess=").append(sess.take(8))
     if (mid != null) sb.append(" msg=").append(mid.take(12))
     if (replyTo != null) sb.append(" replyTo=").append(replyTo.take(12))
     if (name == "delta.message_start" && payload != null) {
@@ -511,6 +514,18 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     }
 
     /**
+     * Set callback for plain (non-structured) assistant replies seen on the
+     * side chat outside any voice turn — e.g. answers to text messages typed
+     * in the side chat. Only done (full) texts are forwarded, never deltas,
+     * so this never fights the voice turn's streaming partials.
+     */
+    @Volatile private var onBackgroundText: ((String) -> Unit)? = null
+
+    fun setOnBackgroundText(cb: ((String) -> Unit)?) {
+        onBackgroundText = cb
+    }
+
+    /**
      * Pump thread: the ONE `subscribeChat` owner. Reconnects across sessions
      * and fans every event out to all taps plus a small replay buffer for
      * late joiners (voice turns). Started lazily, daemon, idempotent.
@@ -603,6 +618,14 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             if (done) buffers.remove(msgId)
                         } else if (done) {
                             buffers.remove(msgId)
+                            // Plain assistant reply (e.g. to a side-chat text
+                            // message): surface it so the Portal shows what
+                            // the voice turn path would show for PTT replies.
+                            val text = buf.toString().trim()
+                            if (text.isNotEmpty()) {
+                                System.out.println("MuseGadgetBg: plain reply len=" + text.length)
+                                try { onBackgroundText?.invoke(text) } catch (_: Exception) { }
+                            }
                         }
                     }
                 } finally {
@@ -719,7 +742,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                 // subscription, and the replay buffer covers anything already seen.
                 ensureChatPump()
                 val tap = subscribeTap()
-                val tracker = MuseTurnTracker()
+                // Owned side-chat turn: every assistant message on this chat
+                // binds even without a parent link (mirrors owns_chat in
+                // muse_turn.py); other chats' events are dropped.
+                val tracker = MuseTurnTracker(chatSessionId, USE_DEDICATED_CHAT_SESSION)
                 try {
                     val ack = session.sendVoiceNoteJson(json, chatSessionId)
                     System.out.println("MuseGadgetVoice: chat/stream ack ok=" + ack["ok"] + " status=" + ack["status"])
@@ -758,8 +784,19 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             continue
                         }
                         System.out.println("MuseGadgetVoice: " + describeChatEvent(ev))
-                        for (te in tracker.feed(ev)) when (te) {
+                        val turnEvents = try {
+                            tracker.feed(ev)
+                        } catch (e: Exception) {
+                            System.out.println("MuseGadgetVoice: tracker EX " + e.javaClass.simpleName)
+                            throw e
+                        }
+                        if (turnEvents.isEmpty()) {
+                            System.out.println("MuseGadgetVoice: no turn event (dropped or non-message)")
+                        }
+                        for (te in turnEvents) when (te) {
                             is TurnEvent.Reply -> {
+                                System.out.println("MuseGadgetVoice: reply msg=" + te.messageId.take(8) +
+                                    " done=" + te.done + " len=" + te.text.length)
                                 listener.onPartial(te.text)
                                 val txt = te.text
                                 if (txt.trim().isNotEmpty()) {
@@ -786,7 +823,9 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         speakStreaming(remaining)
                     }
                     val finalText = tracker.finalText()
-                    System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length)
+                    System.out.println("MuseGadgetVoice: turn done finalLen=" + finalText.length +
+                        " doneIds=" + tracker.doneMessageIds().size +
+                        " hasReplies=" + tracker.hasReplies())
                     listener.onFinal(finalText)
                     speakReplies(tracker.doneMessageIds(), tracker.allText())
                 } finally {

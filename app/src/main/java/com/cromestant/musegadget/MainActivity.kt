@@ -72,6 +72,7 @@ class MainActivity : Activity() {
         }
 
         override fun onPartial(text: String) {
+            if (text.trim().isEmpty()) return
             // Check for structured digest message: {"type": "digest|ticker|artifact|tasks", "content": "..."}
             if (tryHandleStructuredMessage(text)) return
             ui.post { pttResult.text = "Muse: $text" }
@@ -431,6 +432,11 @@ class MainActivity : Activity() {
                 val link = GadgetService.instance?.gadgetLink
                 link?.setOnBackgroundMessage { type, content ->
                     updateDigestSection(type, content)
+                }
+                // Plain side-chat replies (answers to text messages) go to the
+                // main display via the same path as voice-turn finals.
+                link?.setOnBackgroundText { text ->
+                    voiceListener.onFinal(text)
                 }
                 link?.startBackgroundChatListener()
             } catch (_: Exception) { }

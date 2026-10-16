@@ -39,11 +39,23 @@ sealed class TurnEvent {
 private class ReplyState(var text: String = "", var streamed: String = "", var done: Boolean = false)
 
 /**
- * Single-request turn tracker, mirroring `MuseTurn` in `muse_turn.py:194`
- * minus chat ownership. Dependency-free and deterministic; time injectable
- * via [complete]'s `nowMs` param, otherwise `System.currentTimeMillis()`.
+ * Single-request turn tracker, mirroring `MuseTurn` in `muse_turn.py:194`.
+ *
+ * Pass the side-chat id with [ownsChat] = true when the turn posts to the
+ * gadget's dedicated chat (the normal voice-turn path): every assistant
+ * message on that chat belongs to the turn even without a parent link
+ * (mirroring `scoped` in `muse_turn.py:312`), and events from other chats
+ * are dropped. With the default shared-chat arguments only parent-linked
+ * messages bind. Dependency-free and deterministic; time injectable via
+ * [complete]'s `nowMs` param, otherwise `System.currentTimeMillis()`.
+ *
+ * Trace lines (`MuseTurn ...`, ids truncated, never text) go to stdout so a
+ * voice turn can be diagnosed from logcat.
  */
-class MuseTurnTracker {
+class MuseTurnTracker(
+    sessionId: String? = null,
+    private val ownsChat: Boolean = false,
+) {
     private val userIds = HashSet<String>()
     private val replies = LinkedHashMap<String, ReplyState>()
     private val ignored = HashSet<String>()
@@ -55,6 +67,15 @@ class MuseTurnTracker {
 
     /** Last state-changing event, mirroring `MuseTurn.last_activity` in `muse_turn.py:212`. */
     var lastActivityMs: Long = System.currentTimeMillis()
+        private set
+
+    /**
+     * Chat this turn belongs to. Preset for owned side-chat turns; otherwise
+     * learned from the acknowledgement (mirroring `MuseTurn.session_id` in
+     * `muse_turn.py:263`). Compared against `payload.session_id` /
+     * top-level `session_id` on each event.
+     */
+    var sessionId: String? = sessionId
         private set
 
     /**
@@ -95,6 +116,11 @@ class MuseTurnTracker {
         userIds.addAll(ids)
         ackSessionId = (result["session_id"] as? String)?.takeIf { it.isNotEmpty() }
             ?: (response["session_id"] as? String)?.takeIf { it.isNotEmpty() }
+        if (sessionId == null && !ackSessionId.isNullOrEmpty()) sessionId = ackSessionId
+        if (ownsChat && ackSessionId != null && ackSessionId != sessionId) {
+            trace("ack session mismatch: turn=" + shortId(sessionId) + " ack=" + shortId(ackSessionId))
+        }
+        trace("ack users=" + ids.map(::shortId).joinToString(",") + " session=" + shortId(sessionId))
         acknowledged = true
         val held = pending.toList()
         pending.clear()
@@ -112,6 +138,11 @@ class MuseTurnTracker {
         if (event["type"] != "event") return emptyList()
         @Suppress("UNCHECKED_CAST")
         val payload = event["payload"] as? Map<String, Any?> ?: return emptyList()
+        // Chat scope, mirroring `muse_turn.py:284-301`: events naming a
+        // different chat never belong to this turn. Unknown (absent) session
+        // markers pass through so older servers keep working.
+        val eventSession = (payload["session_id"] as? String)?.takeIf { it.isNotEmpty() }
+            ?: (event["session_id"] as? String)?.takeIf { it.isNotEmpty() }
         if (!acknowledged) {
             if (pending.size >= MAX_PENDING_EVENTS) {
                 throw IllegalArgumentException("too many chat events before Muse acknowledged the turn")
@@ -119,13 +150,18 @@ class MuseTurnTracker {
             pending.add(event)
             return emptyList()
         }
+        if (eventSession != null && sessionId != null && eventSession != sessionId) {
+            return emptyList()
+        }
+        val scoped = ownsChat && sessionId != null &&
+            (eventSession == null || eventSession == sessionId)
         val name = event["event"] as? String ?: return emptyList()
         if (name == "agent.status" || name == "task.status") return status(name, payload)
         if (name == "delta.message_start" || name == "delta.text_append" ||
             name == "delta.message_done" || name == "message.assistant" ||
             name == "delta.presentation"
         ) {
-            return message(name, event, payload)
+            return message(name, event, payload, scoped)
         }
         return emptyList()
     }
@@ -192,7 +228,8 @@ class MuseTurnTracker {
     private fun message(
         name: String,
         event: Map<String, Any?>,
-        payload: Map<String, Any?>
+        payload: Map<String, Any?>,
+        scoped: Boolean,
     ): List<TurnEvent> {
         val messageId = (payload["message_id"] as? String)?.takeIf { it.isNotEmpty() }
             ?: (event["message_id"] as? String)?.takeIf { it.isNotEmpty() }
@@ -203,9 +240,14 @@ class MuseTurnTracker {
         val parent = (payload["reply_to_message_id"] as? String)?.takeIf { it.isNotEmpty() }
             ?: (payload["parent_message_id"] as? String)?.takeIf { it.isNotEmpty() }
         // A message binds when its parent is a user id or an already-bound reply
-        // (mirrors `_message` in `muse_turn.py:393`); unrelated parents are ignored.
-        if (parent != null && parent !in userIds && parent !in replies) {
+        // (mirrors `_message` in `muse_turn.py:393`). On the owned side chat a
+        // parentless or self-parented message is also ours (`scoped`); anything
+        // else is another thread's and is ignored from here on.
+        if (parent != null && parent !in userIds && parent !in replies &&
+            !(scoped && parent == messageId)
+        ) {
             ignored.add(messageId)
+            trace("drop " + name + " msg=" + shortId(messageId) + " parent=" + shortId(parent) + " scoped=" + scoped)
             return emptyList()
         }
         var reply = replies[messageId]
@@ -272,10 +314,18 @@ class MuseTurnTracker {
         ) {
             throw IllegalArgumentException("Muse returned more than 64 KiB of reply text")
         }
+        trace("bind " + name + " msg=" + shortId(messageId) + " done=" + reply.done +
+            " len=" + reply.text.length + " scoped=" + scoped)
         return listOf(TurnEvent.Reply(messageId, reply.text, reply.streamed, reply.done))
     }
 
     private fun stripControls(text: String): String = CONTROLS.replace(text, "")
+
+    private fun shortId(id: String?): String = id?.take(8) ?: "none"
+
+    private fun trace(msg: String) {
+        System.out.println("MuseTurn: " + msg)
+    }
 }
 
 /**
