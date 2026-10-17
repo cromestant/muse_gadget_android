@@ -444,11 +444,14 @@ class MainActivity : Activity() {
         }, 2000)
     }
 
-    override fun onPause() {
-        super.onPause()
+    override fun onDestroy() {
         try {
-            GadgetService.instance?.gadgetLink?.stopBackgroundChatListener()
+            GadgetService.instance?.gadgetLink?.let {
+                it.setOnBackgroundMessage(null)
+                it.setOnBackgroundText(null)
+            }
         } catch (_: Exception) { }
+        super.onDestroy()
     }
 
     // ---- permissions (API 29) ----

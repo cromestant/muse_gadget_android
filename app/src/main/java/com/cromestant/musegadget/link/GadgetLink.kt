@@ -81,14 +81,16 @@ internal class ChatFanout(private val replayCap: Int = 500) {
         synchronized(lock) {
             replay.addLast(ev)
             while (replay.size > replayCap) replay.removeFirst()
+            for (tap in taps) tap.offer(ev)
         }
-        for (tap in taps) tap.offer(ev)
     }
 
     fun subscribe(replay: Boolean = true): LinkedBlockingQueue<Map<String, Any?>> {
         val q = LinkedBlockingQueue<Map<String, Any?>>()
-        if (replay) synchronized(lock) { for (ev in this.replay) q.offer(ev) }
-        taps.add(q)
+        synchronized(lock) {
+            if (replay) for (ev in this.replay) q.offer(ev)
+            taps.add(q)
+        }
         return q
     }
 
@@ -664,6 +666,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                         }
                     }
                 } finally {
+                    System.out.println("MuseGadgetBg: consumer stopped")
                     unsubscribeTap(tap)
                     if (bgTap === tap) bgTap = null
                 }
