@@ -163,7 +163,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     private val dellTts: DellTts by lazy { DellTts(player = ttsPlayer) }
 
     /** Streaming TTS: sentences are queued and spoken sequentially by a worker thread. */
-    private val ttsQueue = LinkedBlockingQueue<String>()
+    internal val ttsQueue = LinkedBlockingQueue<String>()
     /** Recently spoken sentences (with timestamps) to deduplicate voice loop + speakReplies. */
     private val recentSpoken = mutableMapOf<String, Long>()
     private val recentSpokenLock = Object()
@@ -538,6 +538,14 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         onBackgroundText = cb
     }
 
+    fun clearTtsQueue() {
+        try { ttsQueue.clear() } catch (_: Exception) { }
+    }
+
+    fun clearTtsQueueOnBackgroundText() = clearTtsQueue()
+
+    fun clearBackgroundTtsQueue() = clearTtsQueue()
+
     /**
      * Pump thread: the ONE `subscribeChat` owner. Reconnects across sessions
      * and fans every event out to all taps plus a small replay buffer for
@@ -650,6 +658,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
                             val text = buf.toString().trim()
                             if (text.isNotEmpty()) {
                                 System.out.println("MuseGadgetBg: plain reply len=" + text.length)
+                                try { ttsQueue.clear() } catch (_: Exception) { }
                                 try { onBackgroundText?.invoke(text) } catch (_: Exception) { }
                             }
                         }

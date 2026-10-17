@@ -436,6 +436,7 @@ class MainActivity : Activity() {
                 // Plain side-chat replies (answers to text messages) go to the
                 // main display via the same path as voice-turn finals.
                 link?.setOnBackgroundText { text ->
+                    try { link?.clearTtsQueue() } catch (_: Exception) { }
                     voiceListener.onFinal(text)
                 }
                 link?.startBackgroundChatListener()
