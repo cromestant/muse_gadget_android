@@ -45,6 +45,7 @@ class DellTts(
                 return false
             }
             System.out.println("MuseGadgetTts: Dell TTS got " + bytes.size + " bytes, playing")
+            if (Thread.currentThread().isInterrupted) return false
             player.play(bytes)
             true
         } catch (e: Exception) {

@@ -755,6 +755,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
      * the caller: all work happens on a worker thread.
      */
     fun sendVoiceTurn(json: String, listener: VoiceTurnListener) {
+        try { ttsQueue.clear() } catch (_: Exception) { }
         thread(isDaemon = true, name = "voice-turn") {
             System.out.println("MuseGadgetVoice: voice-turn thread started")
             val session = current ?: run {
@@ -877,6 +878,10 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
     fun stopTtsPlayback() {
         try {
             ttsThread?.interrupt()
+        } catch (e: Exception) {
+        }
+        try {
+            ttsWorker?.interrupt()
         } catch (e: Exception) {
         }
         // Drop queued (not yet spoken) sentences so barge-in actually
