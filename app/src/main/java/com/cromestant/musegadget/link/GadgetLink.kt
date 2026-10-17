@@ -134,7 +134,7 @@ class GadgetLink(context: Context, private val http: OkHttpClient = MuseApi.newH
         const val USE_DEDICATED_CHAT_SESSION = true
         private const val CHAT_SESSION_ID_KEY = "gadget_chat_session_id"
         /** "Plan custom Android Muse gadget" side chat UUID. */
-        const val GADGET_SIDE_CHAT_ID = "c9c273dc-22a7-4572-a98a-0d6e66f44375"
+        const val GADGET_SIDE_CHAT_ID = "64a26808-9d89-47eb-ba4d-ad0e987e1470"
     }
 
     private val appContext = context.applicationContext
